@@ -82,9 +82,13 @@
 - **올바른 대응 방법**
 
   1. 사전 계획
-     sql-- 변경 영향도 확인
-     EXPLAIN FORMAT=JSON
-     ALTER TABLE users MODIFY COLUMN status ENUM(...);
+
+  ```sql
+   -- 변경 영향도 확인
+   EXPLAIN FORMAT=JSON
+   ALTER TABLE users MODIFY COLUMN status ENUM(...);
+  ```
+
   2. 단계별 변경
 
   ```sql
@@ -105,7 +109,7 @@
      - 서비스 이용이 적은 시간대 선택
      - 사전 공지 및 모니터링 준비
 
-#### postgresql에서는 비슷한 이슈가 없는가?
+#### ✅ postgresql에서는 비슷한 이슈가 없는가?
 
 - PostgreSQL에서도 비슷한 이슈가 있지만, 상황이 조금 다르다고 함
 
@@ -195,10 +199,14 @@
 
 => 테이블 변경 작업은 신중히 해야겠다..
 
+<br />
+
 ### 🔍 추가로 읽어본 글
 
 - [DB 페이지네이션을 최적화하는 여러 방법들](https://taegyunwoo.github.io/tech/Tech_DBPagination?utm_source=chatgpt.com)
   - LIMIT-OFFSET, NO-OFFSET, 커버링 인덱스 비교
+
+<br />
 
 ### 💭 더 알아보고 싶은 개념
 
@@ -208,84 +216,83 @@
 
 #### ✅ 연관관계가 있는 게 좋은가?
 
-**연관 관계 성능 분석**
+- **연관 관계 성능 분석**
 
-**FK 제약조건이 있을 때의 성능 비용**
+  - **FK 제약조건이 있을 때의 성능 비용**
 
-- INSERT 시 매번 참조 테이블 존재 확인으로 추가 SELECT 쿼리 발생
-  ```sql
-  INSERT INTO orders (user_id, product_id) VALUES (123, 456);
-  -- ↓ 내부적으로 실행됨
-  -- SELECT 1 FROM users WHERE id = 123;      -- 존재 확인
-  -- SELECT 1 FROM products WHERE id = 456;   -- 존재 확인
-  ```
-- DELETE 시 모든 자식 테이블에서 참조 데이터 존재 여부 확인 필요
-  ```sql
-  DELETE FROM users WHERE id = 123;
-  -- ↓ 내부적으로 실행됨
-  -- SELECT COUNT(*) FROM orders WHERE user_id = 123;
-  -- SELECT COUNT(*) FROM reviews WHERE user_id = 123;
-  ```
-- 대용량 배치 작업에서 각 행마다 FK 검증으로 심각한 성능 저하
-  ```sql
-  -- 100만 건 INSERT 시 각 행마다 FK 검증 = 200만 번의 추가 SELECT
-  INSERT INTO order_items SELECT ... FROM temp_data; -- 매우 느림
-  ```
+    - INSERT 시 매번 참조 테이블 존재 확인으로 추가 SELECT 쿼리 발생
+      ```sql
+      INSERT INTO orders (user_id, product_id) VALUES (123, 456);
+      -- ↓ 내부적으로 실행됨
+      -- SELECT 1 FROM users WHERE id = 123;      -- 존재 확인
+      -- SELECT 1 FROM products WHERE id = 456;   -- 존재 확인
+      ```
+    - DELETE 시 모든 자식 테이블에서 참조 데이터 존재 여부 확인 필요
+      ```sql
+      DELETE FROM users WHERE id = 123;
+      -- ↓ 내부적으로 실행됨
+      -- SELECT COUNT(*) FROM orders WHERE user_id = 123;
+      -- SELECT COUNT(*) FROM reviews WHERE user_id = 123;
+      ```
+    - 대용량 배치 작업에서 각 행마다 FK 검증으로 심각한 성능 저하
+      ```sql
+      -- 100만 건 INSERT 시 각 행마다 FK 검증 = 200만 번의 추가 SELECT
+      INSERT INTO order_items SELECT ... FROM temp_data; -- 매우 느림
+      ```
 
-**FK 제약조건이 있을 때의 성능 이점**
+  - **FK 제약조건이 있을 때의 성능 이점**
+    - 옵티마이저가 FK 정보를 활용해 JOIN 쿼리 최적화 가능
+      ```sql
+      SELECT u.name, COUNT(o.id)
+      FROM users u
+      LEFT JOIN orders o ON u.id = o.user_id  -- FK 존재 시 최적화됨
+      GROUP BY u.id;
+      ```
+    - 애플리케이션에서 별도 데이터 검증 로직 불필요 (DB 레벨에서 보장)
 
-- 옵티마이저가 FK 정보를 활용해 JOIN 쿼리 최적화 가능
-  ```sql
-  SELECT u.name, COUNT(o.id)
-  FROM users u
-  LEFT JOIN orders o ON u.id = o.user_id  -- FK 존재 시 최적화됨
-  GROUP BY u.id;
-  ```
-- 애플리케이션에서 별도 데이터 검증 로직 불필요 (DB 레벨에서 보장)
+- **FK 제약조건이 없을 때의 성능 이점**
 
-**FK 제약조건이 없을 때의 성능 이점**
+  - INSERT/UPDATE/DELETE 작업이 검증 없이 즉시 실행
+    ```sql
+    INSERT INTO orders (user_id, product_id) VALUES (999999, 888888);
+    -- 존재하지 않는 ID여도 바로 삽입됨
+    ```
+  - 대용량 데이터 이관 및 배치 처리 작업 속도 향상
+    ```sql
+    LOAD DATA INFILE 'orders.csv' INTO TABLE orders; -- FK 검증 없음
+    ```
 
-- INSERT/UPDATE/DELETE 작업이 검증 없이 즉시 실행
-  ```sql
-  INSERT INTO orders (user_id, product_id) VALUES (999999, 888888);
-  -- 존재하지 않는 ID여도 바로 삽입됨
-  ```
-- 대용량 데이터 이관 및 배치 처리 작업 속도 향상
-  ```sql
-  LOAD DATA INFILE 'orders.csv' INTO TABLE orders; -- FK 검증 없음
-  ```
+- **FK 제약조건이 없을 때의 성능 비용**
 
-**FK 제약조건이 없을 때의 성능 비용**
+  - 애플리케이션 레벨에서 매번 데이터 존재 여부 확인 쿼리 필요
+    ```java
+    public void createOrder(Long userId, Long productId) {
+        if (!userExists(userId)) {           // 추가 쿼리
+            throw new UserNotFoundException();
+        }
+        if (!productExists(productId)) {     // 추가 쿼리
+            throw new ProductNotFoundException();
+        }
+        orderRepository.save(new Order(userId, productId));
+    }
+    ```
+  - 고아 데이터 발생으로 인한 복잡한 JOIN 및 EXISTS 조건 추가
+    ```sql
+    SELECT o.* FROM orders o
+    WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = o.user_id)
+      AND EXISTS (SELECT 1 FROM products p WHERE p.id = o.product_id);
+    ```
 
-- 애플리케이션 레벨에서 매번 데이터 존재 여부 확인 쿼리 필요
-  ```java
-  public void createOrder(Long userId, Long productId) {
-      if (!userExists(userId)) {           // 추가 쿼리
-          throw new UserNotFoundException();
-      }
-      if (!productExists(productId)) {     // 추가 쿼리
-          throw new ProductNotFoundException();
-      }
-      orderRepository.save(new Order(userId, productId));
-  }
-  ```
-- 고아 데이터 발생으로 인한 복잡한 JOIN 및 EXISTS 조건 추가
-  ```sql
-  SELECT o.* FROM orders o
-  WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = o.user_id)
-    AND EXISTS (SELECT 1 FROM products p WHERE p.id = o.product_id);
-  ```
+- **실제 성능 비교 결과**
 
-**실제 성능 비교 결과**
+  - INSERT 성능: FK 있음 45초 vs FK 없음 12초 (100만 건 기준)
+  - 복잡한 JOIN 쿼리: FK 있음 1.2초 vs FK 없음 2.8초
 
-- INSERT 성능: FK 있음 45초 vs FK 없음 12초 (100만 건 기준)
-- 복잡한 JOIN 쿼리: FK 있음 1.2초 vs FK 없음 2.8초
+- **사용 권장 상황**
 
-**사용 권장 상황**
-
-- FK 사용 권장: OLTP 시스템, 소중규모 트래픽, 복잡한 관계형 데이터, 데이터 정합성이 중요한 경우
-- FK 없이 사용: 대용량 배치 처리, 고성능 요구 시스템, 마이크로서비스 간 느슨한 결합
-- 하이브리드 방식: 핵심 테이블만 FK 사용, 로그성 테이블은 성능 우선으로 FK 제외
+  - FK 사용 권장: OLTP 시스템, 소중규모 트래픽, 복잡한 관계형 데이터, 데이터 정합성이 중요한 경우
+  - FK 없이 사용: 대용량 배치 처리, 고성능 요구 시스템, 마이크로서비스 간 느슨한 결합
+  - 하이브리드 방식: 핵심 테이블만 FK 사용, 로그성 테이블은 성능 우선으로 FK 제외
 
   ```sql
   -- 핵심 테이블만 FK 사용
@@ -298,6 +305,8 @@
       created_at TIMESTAMP
   );
   ```
+
+<br />
 
 ### 🤔 질문
 
