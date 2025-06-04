@@ -1,0 +1,377 @@
+한줄요약: 외부서비스 장애 영향 최소화하기
+
+### 외부서비스에 장애가 생기면 우리 서비스에도 영향이 있다
+
+서비스 간 연동 시스템 품질도 신경써야 함
+
+연동서비스의 문제로 인한 영향을 줄이는 방법을 살펴봄
+
+# 타임아웃
+
+처리량에 영향을 주는 요소 중 하나 : 응답 시간
+
+A서비스 스레드 풀 크기 200
+
+B서비스 문제, 응답시간 60초 넘김
+
+B서비스가 응답을 하지 못하면 A서비스의 스레드 100개 모두 대기상태
+
+10초 후 100명 또 요청
+
+스레드풀 200개 다 대기상태
+
+10초 후 추가 100명
+
+대기는 끝나지 않고 서비스는 마비된다
+
+⇒ 연동에 대해 타임아웃을 지정하면 B서비스를 사용하지 않는 기능들도 정상적으로 처리되고 대기상태라 마비될일이 없다
+
+## 타임아웃 종류
+
+<aside>
+🧐
+
+연동서비스와 연동하는 절차
+
+1. 연결 시도(A→B)
+2. 연결 성공(B→A)
+3. 요청 전송(A→B)
+4. 응답 전송(B→A)
+5. 연결 종료(A→B)
+</aside>
+
+### 연결 타임아웃 Connection Timeout
+
+연결 시도, 연결 성공 ⇒ 이 과정에 타임아웃 세팅
+
+3s~5s
+
+### 읽기 타임아웃 Read Timeout
+
+5s~30s(결제와 같이 중요한 것은 백에서 처리되는동안 시간이 좀 걸려서 실패 응답이 돌아간다면 크리티컬함)
+
+### 실제 지정
+
+<aside>
+🧐
+
+아래의 것들 자바에서 다른 서버 호출하려고 했을때 봤죠…
+
+1. **Apache HttpClient의 소켓 타임아웃**
+
+Apache HttpClient의 소켓 타임아웃은 **패킷 간격** 기준임.
+
+예를 들어, 소켓 타임아웃을 5초로 설정했을 때, 한 패킷과 다음 패킷이 도착하는 간격이 5초를 넘으면 타임아웃이 발생함.
+
+즉, 패킷이 5초 안에 계속 도착하기만 하면, 전체 요청 시간이 길어져도 타임아웃이 안 날 수 있음.
+
+**요약:** Apache HttpClient는 전체 요청 시간이 아니라 패킷 간격 기준으로 타임아웃 체크함.
+
+---
+
+2. **OkHttp의 호출 타임아웃(callTimeout)**
+
+OkHttp는 타임아웃을 이렇게 구분함:
+
+- 연결 타임아웃 (`connectTimeout`)
+- 읽기 타임아웃 (`readTimeout`)
+- 쓰기 타임아웃 (`writeTimeout`)
+- 호출 타임아웃 (`callTimeout`)
+
+이 중에서 `readTimeout`은 Apache HttpClient의 소켓 타임아웃과 마찬가지로 패킷 간격을 기준으로 동작함.
+
+반면, `callTimeout`은 요청의 **전체 시간**을 기준으로 함.
+
+즉, 패킷이 계속 도착해서 `readTimeout`이 안 나더라도 요청이 너무 오래 걸리면 `callTimeout`으로 강제로 종료 가능함.
+
+**요약:** OkHttp의 `callTimeout`은 전체 요청 시간 기준으로 타임아웃 관리 가능함.
+
+스프링은 톰캣인거임… 스프링은 어떨까?
+
+---
+
+3. **스프링(톰캣 환경)은 어떨까?**
+
+스프링에서 외부 서버 호출은 주로 `RestTemplate`이나 `WebClient`를 사용함.
+
+톰캣은 들어오는 요청을 처리하는 서버고, 외부 호출 타임아웃은 톰캣이 아니라 사용하는 클라이언트 라이브러리 수준에서 관리함.
+
+### (1) `RestTemplate`의 경우
+
+`RestTemplate` 기본 설정 예시 (`SimpleClientHttpRequestFactory`):
+
+```java
+
+SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+factory.setConnectTimeout(5000); // 연결 타임아웃
+factory.setReadTimeout(5000);    // 소켓 타임아웃
+RestTemplate restTemplate = new RestTemplate(factory);
+
+```
+
+Apache HttpClient 쓰는 설정 (`HttpComponentsClientHttpRequestFactory`):
+
+```java
+
+HttpComponentsClientHttpRequestFactory factory =
+    new HttpComponentsClientHttpRequestFactory();
+factory.setConnectTimeout(5000);
+factory.setReadTimeout(5000); // Apache 특성: 패킷 간격 기준
+RestTemplate restTemplate = new RestTemplate(factory);
+
+```
+
+이때는 Apache HttpClient 특성 그대로 **패킷 간격** 기준으로 타임아웃을 판단함.
+
+### (2) `WebClient`의 경우 (비동기 방식)
+
+`WebClient`는 보통 Reactor Netty 기반이며, OkHttp와 비슷하게 전체 호출 시간 기준 타임아웃 설정 가능함.
+
+```java
+
+HttpClient httpClient = HttpClient.create()
+    .responseTimeout(Duration.ofSeconds(10)); // 전체 호출 시간 타임아웃
+
+WebClient webClient = WebClient.builder()
+    .clientConnector(new ReactorClientHttpConnector(httpClient))
+    .build();
+
+```
+
+이렇게 하면 전체 호출 시간을 명확히 제한할 수 있음.
+
+---
+
+4. **톰캣 서버 자체의 타임아웃 설정은?**
+
+톰캣 자체는 외부 호출 관련 타임아웃을 관리하지 않고, 주로 들어오는 요청에 대해 다음 타임아웃을 설정함:
+
+- `connectionTimeout`: 최초 요청 데이터가 도착할 때까지 기다리는 시간 제한 (기본 60초)
+- `keepAliveTimeout`: 커넥션 유지 최대 시간
+- `asyncTimeout`: 비동기 처리 최대 대기 시간
+
+톰캣 자체의 타임아웃은 외부 서버 호출 타임아웃과는 무관함.
+
+</aside>
+
+## 재시도
+
+가능 조건
+
+- 단순 조회 기능
+- 연결 타임아웃
+- 멱등성(idempotent)
+
+고려사항
+
+- 횟수
+- 간격
+
+재시도 폭풍 안티패턴
+
+- 연동서비스 성능저하시에 재시도하면 성능이 더 저하됨
+
+## 동시요청제한
+
+서비스가 처리할 수 있는 만큼만 받고 나머지는 에러 리턴 ⇒ 면접에서 뒷걸음질하다 뭣 잡은 격으로 맞춰보았다…
+
+<aside>
+🧐
+
+벌크헤드 패턴
+
+</aside>
+
+### 서킷브레이커 ⇒ 누전차단기
+
+- 닫힘 closed
+- 열림 open
+- 반 열림 half-open
+
+닫힘 → if(실패>임계치) → 열림
+
+열림 → if(경과시간>차단시간) → 반 열림
+
+반 열림 → if(성공) → 닫힘
+
+반 열림 →if(실패) → 열림
+
+빠른 실패로 기능에 부하가 더해지는것을 막는다
+
+## 외부 연동과 DB 연동 ⇒ 전에 나온 얘기인듯?
+
+### 외부 연동에 실패했을때 트랜잭션을 롤백
+
+⇒ 타임아웃으로 실패했지만 내부적으로는 성공했을때 보정
+
+<aside>
+🧐
+
+- 보정 방법
+    - 매일 전날 포인트 사용내역 비교해 불일치 건이 있으면 수동/자동으로 보정
+    - 성공 확인 API를 호출, 성공 응답이 오면 트랜잭션 지속, 실패 응답이 오면 트랜잭션 롤백
+</aside>
+
+### 외부 연동은 성공했지만 DB 연동에 실패해 트랜잭션을 롤백
+
+⇒ 취소 API를 호출해서 외부 연동을 이전 상태로 되돌리는 것이 필요
+
+⇒ 취소 API가 없거나 취소가 실패할 수 있어서 데이터 일관성이 중요하다면 일정주기로 데이터가 맞는지 비교하는 프로세스를 갖춰야 함
+
+<aside>
+🧐
+
+### 외부 연동이 느려질때 DB 커넥션 풀 문제
+
+트랜잭션 안에 외부연동이 포함되어있어서 커넥션 오래 점유해서 생기는 문제
+무관하다면 트랜잭션 분리하기!!! ⇒ 내가 저번에 생각했던 것!!!
+
+이번에는 전으로 분리도 하고 후로 분리도 하는 케이스가 있음
+
+⇒ DB트랜잭션 후로 외부연동 분리시: 트랜잭션 커밋 이후 외부 연동이 실패한다면 실패한 외부 연동 후처리 방안이 있어야 함
+
+### 후처리 방안
+
+- 보상 트랜잭션 : 트랜잭션으로 반영된 데이터 되돌림
+- 데이터 후보정
+
+일반적으로 실무에서는 두 번째 방법인 **데이터 후보정 방식**을 많이 씀.
+
+- 구현이 간단함.
+- 외부 API 장애 시 서비스 전체가 멈추지 않고 유연하게 대응 가능.
+- 후속 배치처리 및 관리로 장애 상황도 관리하기 편함.
+
+(단, 금융 시스템이나 완전한 일관성이 매우 중요한 경우 보상 트랜잭션이 필요할 수 있음.)
+
+### 추가 고려사항
+
+- **비동기 큐(Message Queue, Kafka 등)** 를 활용
+    - 트랜잭션 완료 후 메시지 큐에 메시지를 넣고 외부 API 호출은 별도 서비스가 처리.
+    - 장애 처리, 재시도 로직을 큐에서 편리하게 관리
+
+</aside>
+
+## HTTP 커넥션 풀
+
+DB 커넥션 풀처럼 HTTP연결도 커넥션 풀을 사용하면 연결 시간을 줄일 수 있어서 응답 속도 향상에 도움이 됨
+
+<aside>
+🧐
+
+- 커넥션 풀은 클라이언트가 관리하고 유지 ⇒ 우리서버에서 다른서버로 요청: 우리서버가 클라
+- 커넥션 풀은 우리 서버에서 생성, 유지, 관리
+- 자바 기반) Apache HttpClient, OkHttp, WebClient 등으로 커넥션 풀 설정
+- HTTP 클라이언트가 외부 서버와 통신할 때, 매번 새로운 커넥션을 만드는 건 비용이 큼
+- 따라서 미리 만들어놓은 커넥션을 재사용하는 방식이 바로 커넥션 풀
+
+## (1) Apache HttpClient 예시
+
+```java
+PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
+cm.setMaxTotal(200); // 전체 최대 커넥션 수
+cm.setDefaultMaxPerRoute(20); // 하나의 호스트당 최대 커넥션 수
+
+CloseableHttpClient client = HttpClients.custom()
+    .setConnectionManager(cm)
+    .build();
+```
+
+## (2) Spring의 RestTemplate + Apache HttpClient 예시
+
+```java
+PoolingHttpClientConnectionManager cm = new PoolingHttpClientConnectionManager();
+cm.setMaxTotal(100);
+cm.setDefaultMaxPerRoute(10);
+
+CloseableHttpClient httpClient = HttpClients.custom()
+    .setConnectionManager(cm)
+    .build();
+
+HttpComponentsClientHttpRequestFactory factory =
+    new HttpComponentsClientHttpRequestFactory(httpClient);
+factory.setConnectTimeout(5000); // 연결 타임아웃
+factory.setReadTimeout(5000);    // 읽기(소켓) 타임아웃
+
+RestTemplate restTemplate = new RestTemplate(factory);
+```
+
+## (3) OkHttp 예시
+
+```java
+java
+CopyEdit
+ConnectionPool connectionPool = new ConnectionPool(20, 5, TimeUnit.MINUTES);
+// 최대 20개 커넥션, 5분간 idle 커넥션 유지
+
+OkHttpClient client = new OkHttpClient.Builder()
+    .connectionPool(connectionPool)
+    .connectTimeout(5, TimeUnit.SECONDS)
+    .readTimeout(5, TimeUnit.SECONDS)
+    .writeTimeout(5, TimeUnit.SECONDS)
+    .callTimeout(10, TimeUnit.SECONDS) // 전체 요청시간 타임아웃
+    .build();
+```
+
+---
+
+## (4) Spring WebClient (Reactor Netty) 예시
+
+```java
+HttpClient httpClient = HttpClient.create(ConnectionProvider.builder("custom")
+        .maxConnections(100)                 // 최대 커넥션 수
+        .pendingAcquireTimeout(Duration.ofSeconds(60)) // 연결 대기 타임아웃
+        .maxIdleTime(Duration.ofSeconds(20)) // idle 커넥션 유지 시간
+        .build())
+    .responseTimeout(Duration.ofSeconds(10)); // 전체 응답 타임아웃
+
+WebClient webClient = WebClient.builder()
+    .clientConnector(new ReactorClientHttpConnector(httpClient))
+    .build();
+```
+
+⇒ 느낀점 : 역시 Netty를 공부하긴 해야겠다
+
+저번 고도화 프로젝트에서 팀 합류 후에 첫 업무가 +RestTemplate 으로 외부 연동 부분 구현하는 거였는데 이걸 먼저 읽었다면 HTTP 커넥션 풀을 적용할걸…하는 후회가 남는다
+
+역시 알수록 보이는게 많아짐…
+
+</aside>
+
+### HTTP 커넥션 풀을 사용할 때 고려할 것
+
+- HTTP 커넥션 풀의 크기
+- 풀에서 HTTP 커넥션을 가져올때까지 대기하는 시간
+- HTTP 커넥션을 유지할 시간(keep alive)
+
+- HTTP 커넥션 풀의 크기
+    - 연동 서비스의 성능에 맞게 결정
+    - 성능보다 많으면 응답시간이 느려지고
+    - 성능보다 적으면 처리능력이 아깝다
+- 대기시간
+    - 1~5초가 적당
+    - 너무 길면 응답시간이 함께 길어짐
+    - 너무 짧으면 일시적 트래픽 증가시에도 커넥션을 구하지 못해 에러 발생
+- 커넥션 유지 시간
+    - HTTP/1.1에서는 Keep-Alive 헤더로 설정
+    - 서버가 연결을 끊기 때문에 클라이언트의 커넥션 풀도 더 오래 커넥션을 유지하면 안 됨
+
+### 연동 서비스 이중화
+
+서비스가 대량트래픽을 처리할만큼 성장했다면 연동 서비스의 이중화를 고려해야 함
+
+쇼핑서비스 ⇒ 결제서비스
+
+의 구조일때 결제서비스가 장애나면 매출이 0원되니까
+
+결제서비스를 다중화함
+
+다중화 ⇒ 추가비용 발생
+
+- 핵심 서비스만
+- 이중화 비용을 감당할 수 있을때
+
+진행한다
+
+로그 수집 연동을 이중화하자고 설득하는건 어려움
+
+실제 사례) 가입이 안 됨! ⇒ 문자 서비스 이중화 안 되어있어서
