@@ -1,0 +1,1341 @@
+<aside>
+💡
+
+### 비동기(Asynchronous)랑 논블로킹(Non-blocking)이 완전 별개의 개념~
+
+**비동기 vs 동기**는 **결과를 언제 어떻게 받을 것인가**
+
+- **동기**: 작업을 요청하고 결과를 받을 때까지 기다림
+- **비동기**: 작업을 요청하고 결과는 나중에 콜백/이벤트로 받음
+
+**블로킹 vs 논블로킹**은 **함수를 호출했을 때 제어권을 언제 돌려받을 것인가**
+
+- **블로킹**: 작업이 완료될 때까지 제어권을 안 돌려줌
+- **논블로킹**: 작업 완료 여부와 상관없이 즉시 제어권을 돌려줌
+
+아래 4가지 조합이 가능~
+
+- **동기 + 블로킹**: 일반적인 함수 호출 (결과 받을 때까지 대기)(Node.js의 fs.readFileSync())
+- **동기 + 논블로킹**: 폴링 방식 (계속 확인하면서 기다림)
+- **비동기 + 블로킹**: 잘 안 쓰이는 패턴 (select() 함수 같은 경우)
+- **비동기 + 논블로킹**: 이벤트 루프, Promise/async-await 같은 현대적 방식(
+ Node.js의 `fs.readFile()`, JS의 `setTimeout`도)
+
+### 쉽게 이해해보자~
+
+**동기+블로킹**
+
+- 음식점에서 주문하고 음식이 나올 때까지 카운터 앞에서 꼼짝 안 하고 기다리는 상황.
+- 음식이 완성되면 직접 받아서 자리로 감. 기다리는 동안 아무것도 못함
+
+**비동기+논블로킹**
+
+- 음식점에서 주문하고 진동벨을 받아서 자리에 앉아 있다가, 벨이 울리면 가서 음식을 가져오는 방식.
+- 기다리는 동안 친구와 대화도 하고 폰도 보고 다른 일을 할 수 있어서 효율적
+
+**동기+논블로킹**
+
+- 음식점에서 주문하고 매 1분마다 카운터에 가서 "제 음식 나왔나요?"라고 계속 물어보는 것임
+- 카운터 직원은 바로 "아직요" 또는 "나왔어요"라고 답해줌
+- 손님은 음식이 완성될 때까지 계속 확인하러 가야 함
+- 비효율적이지만 가끔 필요한 경우가 있다(폴링)
+
+**비동기+블로킹**
+
+- 여러 음식점에 동시에 주문을 넣고 어느 곳이든 먼저 완성되는 곳 앞에서 기다리는 상황
+- 하나라도 완성되면 그때부터 여러 주문을 동시에 처리하기 시작
+
+1. **피자집, 치킨집, 중국집에 동시 주문** (비동기 시작)
+2. **피자집 앞에서만 서서 기다림** (블로킹)
+3. **피자 받으면 그제서야 치킨집, 중국집 가서 받기**
+</aside>
+
+<aside>
+🧐
+
+### 비동기+블로킹을… 대체 왜 하는건데..?
+
+## 진짜…언제 쓰는건데..?
+
+⇒ 다른건 이해가 가는데 비동기 블로킹은 언제 왜 쓰는지 이해가 안 가서 좀 더 찾아봄
+
+`select()`: Unix/Linux 시스템에서 제공하는 **다중 입출력 다중화(I/O multiplexing)** 시스템 콜
+
+여러 개의 파일 디스크립터(소켓, 파일 등)를 동시에 모니터링하다가, 그 중 하나라도 읽기/쓰기가 가능해지면 알려주는 함수
+
+서버가 1000개의 클라이언트와 연결되어 있을 때 각각을 위해 1000개의 스레드를 만들면 메모리도 많이 쓰고 성능도 떨어져서 하나의 스레드로 여러 연결을 관리하는 방법이라고 함
+
+## 🤔 왜 이런 이상한 조합을?
+
+### 잘못된 해결법들
+
+**1. 동기+블로킹 (순차 처리)**
+
+```c
+
+for(int i = 0; i < 1000; i++) {
+    read(client[i]);// 첫 번째가 안 오면 나머지 999개 대기
+}
+
+```
+
+→ 첫 번째 클라이언트가 응답 안 하면 모든 게 멈춤
+
+1. **동기 + 논블로킹** (폴링 지옥)
+
+```java
+// 이것도 비효율적
+while(1) {
+    for(int i = 0; i < 1000; i++) {
+        int result = read(client_fd[i], buffer, 1024); // 즉시 리턴
+        if(result == -1 && errno == EAGAIN) {
+            continue; // 데이터 없음, 다음으로
+        }
+        // 데이터 처리
+    }
+}
+```
+
+1. **비동기 + 논블로킹** (콜백 지옥)
+
+```java
+// 각각에 콜백 등록
+for(int i = 0; i < 1000; i++) {
+    aio_read(&aiocb[i]); // 각각 비동기 읽기 시작
+}
+```
+
+**4. 스레드 1000개**
+
+```c
+
+for(int i = 0; i < 1000; i++) {
+    pthread_create(&thread[i], NULL, handle_client, &client[i]);
+}
+
+```
+
+→ 메모리 폭발 ⇒ die (스레드당 ~8MB)
+
+### 비동기+블로킹 = 천국 ⇒ select()의 해결법
+
+```c
+while(1) {
+    FD_ZERO(&readfds);
+    for(int i = 0; i < 1000; i++) {
+        FD_SET(client[i], &readfds);// 1000개 등록
+    }
+
+// 이 한 줄로 1000개를 동시에 모니터링하다가
+// 하나라도 데이터 오면 깨어남
+    select(max_fd + 1, &readfds, NULL, NULL, NULL);
+
+// 준비된 것들만 처리
+    for(int i = 0; i < 1000; i++) {
+        if(FD_ISSET(client[i], &readfds)) {
+            handle_client(client[i]);// 준비된 것만 처리
+        }
+    }
+}
+
+```
+
+## 💡 왜 이렇게 해야만 했는가~
+
+**리소스 효율성**
+
+- 스레드 1개로 1000개 연결 관리
+- 메모리: 8GB → 8MB로 절약
+- CPU: 컨텍스트 스위칭 최소화
+
+**실시간 반응성**
+
+- 어느 클라이언트든 데이터 오면 즉시 처리
+- 순서 상관없이 준비된 것부터 처리
+
+### **비동기 부분**
+
+- 1000개 파일 디스크립터를 **동시에 모니터링**
+- 어떤 순서로 데이터가 와도 상관없음
+- 준비된 것들을 **병렬적으로 처리**
+
+### **블로킹 부분**
+
+- `select()` 한 번으로 **효율적 대기**
+- CPU 낭비 없음 (폴링 안 함)
+- **하나라도 준비되면 즉시 깨어남**
+
+## 예전에 본 예시
+
+리액트 Promise도 모르던 시절 공부를 했었죠.. 
+
+그러다 보게된 Promise.all이 기억이 나네요…
+
+React + Promise.all : 병렬 비동기 처리
+
+```jsx
+import React, { useEffect, useState } from 'react';
+
+function DataFetcher() {
+  const [data, setData] = useState([]);
+
+  useEffect(() => {
+    async function fetchData() {
+      const urls = [
+        'https://www.minisundev.com/posts/1',
+        'https://www.minisundev.com/posts/2',
+        'https://www.minisundev.com/posts/3',
+      ];
+
+      try {
+        // 병렬로 동시에 요청 보내고, 모두 끝날 때까지 기다림 (select처럼)
+        const responses = await Promise.all(urls.map(url => fetch(url)));
+        const results = await Promise.all(responses.map(res => res.json()));
+        setData(results); // 순서대로 처리
+      } catch (err) {
+        console.error('Error fetching:', err);
+      }
+    }
+
+    fetchData();
+  }, []);
+
+  return (
+    <div>
+      <h1>Fetched Data</h1>
+      <ul>
+        {data.map(d => (
+          <li key={d.id}>{d.title}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+```
+
+둘의 상황이 비슷하다~~ 이럴때 사용한다~~
+
+| C/Linux select | React + Promise.all |
+| --- | --- |
+| `select()`로 여러 소켓을 **동시에 모니터링** | `Promise.all()`로 여러 요청을 **동시에 대기** |
+| 데이터가 **도착하면 블로킹 풀림** | 모든 fetch가 **resolve되면 이후 로직 실행** |
+| 불필요한 리소스 낭비 없음 | fetch들을 순차적으로 기다리지 않고 **병렬 처리** |
+| 클라이언트 중 **준비된 것만 처리** | 응답된 것들을 한 번에 모아서 처리 |
+
+### 🔄 **비동기 (Asynchronous)**
+
+- 요청을 보냈지만, **그 결과를 기다리지 않고 다음 작업을 진행**할 수 있음.
+- 대표 예: `fetch()`, `setTimeout()`
+
+### 🛑 **블로킹 (Blocking처럼 보이는 `await`)**
+
+- `await`는 **그 자리에서 멈춰서 결과를 기다리는 것처럼 보임**.
+- 하지만 **실제로는 JS 엔진이 멈추는 게 아니라, 그 함수의 나머지 코드 실행을 미뤄둠**.
+- 즉, **다른 이벤트 루프는 그대로 돈다.**
+
+```jsx
+await 구문	실행 멈춘 듯 보이나 → 실제로는 뒤 로직이 Microtask Queue에 대기
+그 동안	UI 반응성 살아있음 / 다른 코드도 실행됨
+이벤트 루프	콜 스택 비면 Microtask → Task 순으로 하나씩 실행
+
+리액트는 단일스레드이다~~ 비동기로 이거저거 순서 바꿔가면서 할 뿐임...
+```
+
+</aside>
+
+<aside>
+🧐
+
+### 사실… 동기+논블로킹도 더 찾아봄
+
+폴링 방식으로 알림 구현이 가능한걸 알고있어서 대충 그런식이고 비효율적이군~ 
+
+하고 넘어갔는데 
+
+얘도 비동기+블로킹의 select()처럼 이게 최적인 사례도 있을수가 있잖아?
+
+예시를 살펴보면 절대 끊기면 안 되는 상태일때 쓰는거같다
+
+- **실시간성이 중요한** 애플리케이션
+- **메인 루프가 멈추면 안 되는** 시스템
+- **폴링하되 블로킹하고 싶지 않은** 상황
+
+### 게임/실시간 애플리케이션 - 프레임 드랍 방지
+
+```java
+// 게임 메인 루프
+while(game_running) {
+    // 네트워크 데이터 확인 (논블로킹)
+    int result = recv(network_socket, buffer, 1024, MSG_DONTWAIT);
+    
+    if(result > 0) {
+        // 데이터 있으면 처리
+        process_network_data(buffer);
+    } else if(result == -1 && errno == EAGAIN) {
+        // 데이터 없음 - 괜찮음, 게임 계속
+    }
+    
+    // 게임 로직은 항상 실행 (60fps 유지)
+    update_game_logic();
+    render_frame();
+    
+    sleep_until_next_frame(); // 16.67ms
+}
+```
+
+프레임 진짜진짜 중요하지…
+
+- 게임은 **60fps를 유지**해야 함(프레임이 곧 에임이고 티어 읍읍)
+- 네트워크 데이터 기다리다가 **프레임 드랍**하면 안 됨
+- 데이터 있으면 처리하고, 없으면 무시하고 게임 진행
+
+### UI 애플리케이션 - 반응성 유지
+
+```jsx
+// 채팅 앱에서 메시지 확인
+function updateUI() {
+    // 새 메시지 확인 (논블로킹)
+    fetch('/api/messages', { 
+        signal: AbortSignal.timeout(0) // 즉시 타임아웃
+    })
+    .then(response => {
+        if(response.ok) {
+            // 새 메시지 있으면 UI 업데이트
+            updateMessageList(response.data);
+        }
+    })
+    .catch(error => {
+        // 타임아웃이나 에러 - 무시하고 진행
+    });
+    
+    // UI는 항상 반응해야 함
+    handleUserInput();
+    updateAnimations();
+    
+    requestAnimationFrame(updateUI); // 다음 프레임
+}
+```
+
+게임 프레임 드랍이랑 비슷한 의미같기도…
+
+### 멀티미디어 처리 - 버퍼 관리
+
+```c
+// 오디오 스트리밍
+while(playing) {
+    // 네트워크 버퍼 확인 (논블로킹)
+    int bytes = recv(stream_socket, audio_buffer, BUFFER_SIZE, MSG_DONTWAIT);
+    
+    if(bytes > 0) {
+        // 새 오디오 데이터 추가
+        add_to_playback_buffer(audio_buffer, bytes);
+    }
+    
+    // 오디오는 끊기면 안 됨 - 기존 버퍼로 재생 계속
+    play_current_buffer();
+    
+    usleep(1000); // 1ms
+}
+```
+
+</aside>
+
+### **서버가 동시에 요청처리하는 방법**
+
+클라이언트 요청마다 스레드를 할당 ⇒ 스프링 디폴트
+
+비동기 IO(혹은 논블로킹 IO) ⇒ 리액트 디폴트
+
+1. 멀티스레드 방식 → 스프링 기본값
+    - 요청마다 스레드 할당
+    - Thread Pool 사용
+2. 이벤트 루프 + 비동기 IO → React.js, Node.js 기본값
+    - 단일 스레드 + 논블로킹 IO
+    - 콜백/Promise 기반
+
+## 커스텀도 가능하다~
+
+Atomic 연산을 CAS말고도 알아보자~
+
+### Hardware Atomic 연산들
+
+**CPU가 하드웨어 레벨에서 원자적으로 수행**하는 연산
+
+운영체제나 소프트웨어의 개입 없이 **단일 명령어로 완료**되어 중간에 다른 스레드가 끼어들 수 없음
+
+## Compare-And-Swap (CAS)
+
+모든 Lock-free 알고리즘의 기반
+
+```java
+
+// CAS 의사코드
+boolean compareAndSwap(int* ptr, int expected, int new_value) {
+    if (*ptr == expected) {
+        *ptr = new_value;
+        return true;// 성공
+    }
+    return false;// 실패
+}
+
+// Java에서 CAS 사용
+AtomicInteger counter = new AtomicInteger(5);
+boolean success = counter.compareAndSet(5, 10);// 5면 10으로 변경
+
+```
+
+**CAS의 ABA 문제와 해결책**
+
+```java
+
+// ABA 문제: A → B → A로 변경되었는데 감지하지 못함
+AtomicStampedReference<String> ref = new AtomicStampedReference<>("A", 0);
+
+// 스탬프(버전)도 함께 확인
+int stamp = ref.getStamp();
+ref.compareAndSet("A", "C", stamp, stamp + 1);
+
+```
+
+⇒ CAS 버저닝을… gc 공부하다 보았었지! 라는 생각이 들어서!
+
+<aside>
+🧐
+
+CAS versioning 과 GC versioning 의 유사점!
+
+### CAS의 ABA 문제와 GC에서의 버저닝을 알아보자~~
+
+### CAS ABA 문제 상세 분석
+
+```java
+
+// ABA 문제 시나리오
+public class ABADemo {
+    private AtomicReference<Node> head = new AtomicReference<>();
+
+// 문제 상황: Stack에서 pop 연산
+    public Node pop() {
+        Node oldHead, newHead;
+        do {
+            oldHead = head.get();// 1. A 읽음
+            if (oldHead == null) return null;
+            newHead = oldHead.next;// 2. A.next 저장
+
+// 💥 여기서 다른 스레드가:
+// head: A → B → C
+// pop() → A 제거, head = B
+// pop() → B 제거, head = C
+// push(A) → head = A (A.next = C)
+// 결과: head가 다시 A가 되었지만 A.next가 변경됨!
+
+        } while (!head.compareAndSet(oldHead, newHead));
+        // 3. A→newHead 시도// 성공하지만 newHead는 잘못된 값!
+
+        return oldHead;
+    }
+}
+
+```
+
+## 2. CAS ABA 문제 해결책들
+
+### 버전 기반 방법: AtomicStampedReference
+
+스탬프(라고 쓰고 카운터라고 읽는다) 도입
+
+```java
+원래: [값: 100, 버전: 1]
+스레드 B가 변경: [값: 50, 버전: 2] → [값: 100, 버전: 3]
+스레드 A 확인: "어? 값은 100이지만 버전이 1→3으로 바뀌었네!"
+```
+
+**장점**
+
+- 중간에 변경이 있었다는 걸 확실히 알 수 있음
+
+**단점**
+
+- 추가 메모리 필요, 버전 오버플로우 가능성
+
+### 마킹 기반 방법: AtomicMarkableReference
+
+포인터에 "삭제 표시" 비트를 붙임
+
+```java
+포인터 구조: [주소 | 마킹 비트]
+정상 상태: [0x1000 | 0] (마킹 안됨)
+삭제 예정: [0x1000 | 1] (마킹됨)
+```
+
+- 실제 삭제 전에 먼저 삭제 예정 표시를 해 다른 스레드가 이미 처리 중인 노드를 건드리지 않게 됨
+
+```java
+import java.util.concurrent.atomic.AtomicMarkableReference;
+
+class SafeNode {
+    int data;
+    // 포인터 + 마킹 비트를 함께 관리
+    AtomicMarkableReference<SafeNode> next;
+    
+    SafeNode(int data) {
+        this.data = data;
+        this.next = new AtomicMarkableReference<>(null, false);
+    }
+}
+
+class SafeLinkedList {
+    private SafeNode head;
+    
+    public boolean remove(int value) {
+        retry: while (true) {
+            SafeNode prev = head;
+            SafeNode curr = prev.next.getReference();
+            
+            // value를 가진 노드 찾기
+            while (curr != null) {
+                SafeNode succ = curr.next.getReference();
+                boolean currMarked = curr.next.isMarked();
+                
+                // 🔍 이미 삭제 표시된 노드는 건너뛰기
+                if (currMarked) {
+                    // 삭제 표시된 노드를 물리적으로 제거
+                    if (!prev.next.compareAndSet(curr, succ, false, false)) {
+                        continue retry; // 실패하면 처음부터 다시
+                    }
+                    curr = succ;
+                } else if (curr.data == value) {
+                    break; // 목표 노드 발견!
+                } else {
+                    prev = curr;
+                    curr = succ;
+                }
+            }
+            
+            if (curr == null) return false; // 노드를 못찾음
+            
+            SafeNode succ = curr.next.getReference();
+            
+            // 🎯 핵심: 2단계 삭제 과정
+            
+            // 1단계: 논리적 삭제 (마킹)
+            if (!curr.next.compareAndSet(succ, succ, false, true)) {
+                continue retry; // 다른 스레드가 먼저 마킹했음
+            }
+            
+            // 2단계: 물리적 삭제 (연결 끊기)
+            prev.next.compareAndSet(curr, succ, false, false);
+            // 💡 이 단계가 실패해도 괜찮음! 다른 스레드가 나중에 정리해줄거임
+            
+            return true;
+        }
+    }
+}
+```
+
+CAS로 삭제하는 이유는 **여러 스레드가 동시에 같은 자료구조를 수정할 때 안전하게 노드를 제거하기 위해…**
+
+⇒ 보다보니 진짜 gc랑 유사하잖아요
+
+## GC
+
+- **마킹 ⇒ 체크박스다!**  "살아있음/죽음" 이진 상태만 관리
+- **버저닝 ⇒ 셀렉트박스다!** "0세대/1세대/2세대" 또는 "빨강/파랑/초록" 같은 다중 상태 관리
+
+### 마킹 기반 GC
+
+### Serial GC (Mark-Sweep)
+
+**단일 스레드로 순차 처리**
+
+```
+힙 메모리: [A] [B] [C] [D] [E] [F]
+마킹 단계: [✓] [ ] [✓] [✓] [ ] [✓] (순차적으로 하나씩)
+스위프:    [A] [X] [C] [D] [X] [F] (연속된 빈 공간)
+결과:      메모리 단편화 발생
+```
+
+### Parallel GC (Mark-Sweep-Compact)
+
+**여러 스레드로 병렬 처리 + 압축**
+
+```
+
+힙 메모리: [A] [B] [C] [D] [E] [F] [G] [H]
+스레드1:   [✓] [ ] [✓] [✓] (앞쪽 담당)
+스레드2:   [ ] [✓] [✓] [ ] (뒤쪽 담당)
+스위프 후: [A] [X] [C] [D] [X] [F] [G] [X]
+압축 후:   [A] [C] [D] [F] [G] [빈공간...]
+```
+
+### CMS GC (Concurrent Mark-Sweep)
+
+**애플리케이션과 동시 실행**
+
+```
+애플리케이션: ████████████████████████████
+Initial Mark: ▌ (STW - 짧음)
+Concurrent:   ░░░░░░░░░░░░░░░░ (백그라운드 마킹)
+Remark:       ▌ (STW - 짧음)
+Sweep:        ░░░░░░░░░░ (백그라운드 청소)
+
+문제점: 압축 없음 → 단편화 누적
+```
+
+### 버전 기반 GC
+
+### G1 GC (Garbage First)
+
+**힙을 작은 영역(Region)으로 나누어 관리**
+
+```
+힙 구조 (각 사각형이 Region):
+┌─────┬─────┬─────┬─────┐
+│Young│Young│ Old │ Old │
+├─────┼─────┼─────┼─────┤
+│Young│Empty│ Old │Huge │
+└─────┴─────┴─────┴─────┘
+
+GC 과정:
+1. 가비지 많은 Region 우선 수집
+2. Young → Old 승급 시 다른 Region으로 이동
+3. 목표 중단 시간 내에서 최대한 수집
+
+Young GC: [Young영역들만] → 빠름
+Mixed GC: [Young + Old 일부] → 중간
+Full GC:  [전체] → 드물게 발생
+
+```
+
+### ZGC (Z Garbage Collector)
+
+**컬러드 포인터 + 동시 재배치**
+
+```
+
+포인터 구조 (64bit):
+┌─────────────┬──┬──┬──┬────────────────────┐
+│   주소값    │M0│M1│R │      기타          │
+└─────────────┴──┴──┴──┴────────────────────┘
+              Mark bits  Relocation bit
+
+동작 과정:
+1. Concurrent Mark: M0/M1 비트로 마킹
+2. Concurrent Relocation: 객체 이동하며 포인터 업데이트
+3. STW 시간: 항상 10ms 미만
+
+예시:
+객체 A가 0x1000 → 0x2000으로 이동
+기존 포인터: 0x1000|R=0 → 읽기 시 자동으로 0x2000|R=1로 업데이트
+
+```
+
+### Shenandoah GC
+
+**브룩스 포인터 + 동시 재배치**
+
+```
+
+객체 구조:
+┌──────────────┬─────────────────┐
+│Brooks Pointer│   실제 데이터   │
+└──────────────┴─────────────────┘
+      ↓
+  실제 위치 가리킴
+
+재배치 과정:
+1. 객체 A를 새 위치로 복사
+2. Brooks Pointer만 업데이트
+3. 원본 객체는 나중에 정리
+
+Old Location: [Brooks→New] [Data]
+New Location: [Brooks→Self] [Data]
+
+```
+
+**CAS 버저닝과 GC 버저닝의 공통점~**
+
+- **상태 변화 감지⇒**  메모리가 예상과 다르게 변경되었는지 확인
+- **원자적 업데이트⇒** 값과 버전을 동시에 변경
+- 오버헤드…
+</aside>
+
+## 2. Fetch-And-Add (FAA)
+
+**값을 읽고 동시에 더하기**를 원자적으로 수행합니다.
+
+```java
+
+// Hardware 레벨
+int fetch_and_add(int* ptr, int increment) {
+    int old_value = *ptr;
+    *ptr += increment;
+    return old_value;// 이전 값 반환
+}
+
+// Java 구현
+AtomicInteger counter = new AtomicInteger(10);
+int oldValue = counter.getAndAdd(5);// oldValue=10, counter=15
+int newValue = counter.addAndGet(3);// newValue=18, counter=18
+
+```
+
+## 3. Test-And-Set (TAS)
+
+**값을 확인하고 동시에 설정**하는 연산으로, 스핀락의 기반입니다.
+
+```java
+
+java
+// Hardware 레벨
+boolean test_and_set(boolean* lock) {
+    boolean old = *lock;
+    *lock = true;
+    return old;// 이전 값 반환
+}
+
+// Java로 스핀락 구현
+public class SpinLock {
+    private AtomicBoolean locked = new AtomicBoolean(false);
+
+    public void lock() {
+        while (locked.getAndSet(true)) {// TAS 연산// 스핀 대기
+            Thread.onSpinWait();// CPU 힌트
+        }
+    }
+
+    public void unlock() {
+        locked.set(false);
+    }
+}
+
+```
+
+그 후로 약간 노잼…이라 관둠
+
+동시성 해결을 자바만으로 해야할때 최선의.. 방법은 무엇이었을까?
+
+<aside>
+🧐
+
+### ReadWriteLock의 Write starvation 문제…
+
+읽기 스레드들: 📖📖📖📖📖📖📖📖📖📖 (계속 들어옴)
+쓰기 스레드:   😴😴😴😴😴😴😴😴😴😴 (영원히 대기...)
+
+⇒ 쓸수가 없어.. 쓰기가 굶어 죽을때까지 기다림
+
+### 그래서 StampedLock은?
+
+읽기 스레드들: 📖📖📖 → 잠깐 대기
+쓰기 스레드:           ✍️ (우선 처리)
+읽기 스레드들:              📖📖📖 (이어서 진행)
+
+### Optimistic Reading - StampedLock의 장점
+
+```java
+// StampedLock의 비밀 무기
+long stamp = lock.tryOptimisticRead();  // 락 없이 읽기 시도! 🚀
+// 데이터 읽기 (매우 빠름)
+if (lock.validate(stamp)) {             // 중간에 변경 없었나?
+    return data;  // 성공! 락 오버헤드 0
+} else {
+    // 실패, 일반 읽기 락으로 재시도
+    stamp = lock.readLock();
+    try {
+        return readData();
+    } finally {
+        lock.unlockRead(stamp);
+    }
+}
+```
+
+*ReadWriteLock - 무거움*
+- 내부에 2개의 락 (읽기용, 쓰기용)
+- AQS(AbstractQueuedSynchronizer) 사용
+- 대기 스레드 큐 관리
+
+*StampedLock - 가벼움*
+- 단일 long 값으로 상태 관리
+- 더 적은 메모리 사용
+- 더 적은 객체 생성
+
+### **읽기 90%, 쓰기 10% 상황**
+
+ReadWriteLock:    ⭐⭐⭐ (괜찮음)
+StampedLock:      ⭐⭐⭐⭐⭐ (훨씬 빠름) // Optimistic Reading으로 대부분 락 없이 처리
+
+### **읽기 50%, 쓰기 50% 상황**
+
+ReadWriteLock:    ⭐⭐ (쓰기 기아 발생)
+StampedLock:      ⭐⭐⭐⭐ (쓰기 우선권 보장)
+
+### **쓰기가 많은 상황**
+
+ReadWriteLock:    ⭐⭐⭐
+StampedLock:      ⭐⭐⭐⭐ (약간 더 좋음)
+
+### **ReadWriteLock의 단점**
+
+❌ Writer Starvation (쓰기 기아)
+❌ 상대적으로 느린 성능
+❌ 더 많은 메모리 사용
+✅ 사용하기 쉬움
+✅ 재진입 가능 (Reentrant)
+
+### **StampedLock의 단점**
+
+✅ 빠른 성능
+✅ 쓰기 우선권
+✅ Optimistic Reading
+❌ 재진입 불가능! (Non-Reentrant)
+❌ 사용법이 복잡함
+❌ 스탬프 관리 실수 위험
+
+### **ReadWriteLock 사용**
+
+✅ 코드 단순성이 중요한 경우
+✅ 재진입이 필요한 경우
+✅ 팀원들이 익숙한 방식 선호
+✅ 성능이 크리티컬하지 않은 경우
+
+### **StampedLock 사용**
+
+✅ 최고 성능이 필요한 경우
+✅ 읽기가 압도적으로 많은 경우 (90%+)
+✅ 쓰기 기아를 방지해야 하는 경우
+✅ 메모리 사용량을 줄이고 싶은 경우
+
+StampedLock은 성능을 위해 재진입을 포기했다고 한다…
+
+### **ReentrantReadWriteLock의 내부**
+
+```java
+
+// 복잡한 구조 (재진입 지원을 위해)
+class ReentrantReadWriteLock {
+    private final ThreadLocal<Integer> readCount;// 스레드별 읽기 카운트
+    private Thread ownerThread;// 소유 스레드 추적
+    private int writeCount;// 쓰기 재진입 카운트
+    // ... 더 많은 오버헤드
+}
+
+```
+
+### **StampedLock의 내부**
+
+```java
+
+// 단순한 구조 (성능 최우선)
+class StampedLock {
+    private volatile long state;
+    // 단일 long 값으로 모든 상태 관리
+    // 스레드 추적 없음 → 빠름!
+    // 재진입 카운트 없음 → 가벼움!
+}
+
+```
+
+### **메모리 오버헤드 최소화**
+
+// ReentrantReadWriteLock이 해야 하는 일들
+✅ 현재 락 소유자가 누구인지 기억
+✅ 각 스레드가 몇 번 락을 잡았는지 카운트
+✅ 읽기 락을 잡은 스레드들 목록 관리
+→ 메모리 사용량 ⬆️, 성능 ⬇️
+
+// StampedLock이 하는 일
+✅ 락 상태만 long 하나로 관리
+→ 메모리 사용량 ⬇️, 성능 ⬆️
+
+### **스탬프(Stamp) 시스템의 한계**
+
+```java
+
+// StampedLock의 스탬프 방식
+long stamp1 = lock.writeLock();// 스탬프: 12345
+long stamp2 = lock.writeLock();// 만약 재진입 된다면 스탬프: ?????// 문제: 어떤 스탬프로 해제해야 하나?
+lock.unlockWrite(stamp1);// 이거?
+lock.unlockWrite(stamp2);// 아니면 이거?// ReentrantReadWriteLock은 스탬프 없이 단순하게
+lock.unlock();// 가장 최근 락만 해제
+
+```
+
+### **데드락 시나리오**
+
+⇒ ReentrantLock 시리즈는 데드락이 나지 않지… 그렇다면 안전성 측면에선 걔가 더 좋은것 아닐까…
+
+```java
+
+StampedLock lock = new StampedLock();
+
+public void outerMethod() {
+    long stamp = lock.writeLock();// 락 획득
+    System.out.println("외부 메서드 시작");
+
+    try {
+        innerMethod();// 💣 폭탄!
+    } finally {
+        lock.unlockWrite(stamp);
+    }
+}
+
+public void innerMethod() {
+    long stamp = lock.writeLock();// ❌ 여기서 영원히 블로킹!
+    System.out.println("내부 메서드");// 절대 실행 안 됨
+
+    try {
+// 작업
+    } finally {
+        lock.unlockWrite(stamp);
+    }
+}
+
+```
+
+</aside>
+
+### ReadWriteLock 사용시
+
+```java
+@Service
+public class ReservationService {
+    private final RoomReservationRepository roomReservationRepository;
+    private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("HH:mm");
+
+    private final ConcurrentHashMap<Long, ReentrantReadWriteLock> roomLocks = new ConcurrentHashMap<>();
+
+    public ReservationService(final RoomReservationRepository roomReservationRepository) {
+        this.roomReservationRepository = roomReservationRepository;
+    }
+
+    public RoomReservation createReservation(final RoomReservationRequestDto request) {
+        LocalTime startTime = LocalTime.parse(request.getFrom(), timeFormatter);
+        LocalTime endTime = LocalTime.parse(request.getTo(), timeFormatter);
+
+        validateReservationTime(startTime, endTime);
+
+        ReentrantReadWriteLock roomLock = getRoomLock(request.getRoomId());
+
+        roomLock.writeLock().lock();
+        try {
+            // 시간 충돌 검사 및 예약 생성
+            validateTimeConflict(request.getRoomId(), startTime, endTime);
+
+            TimeSlice timeSlice = new TimeSlice(startTime, endTime);
+            RoomReservation reservation = new RoomReservation(timeSlice, request.getUserId(), request.getRoomId());
+
+            return roomReservationRepository.insert(reservation);
+        } finally {
+            roomLock.writeLock().unlock();
+        }
+    }
+
+    public List<RoomReservation> getRoomReservations(long roomId) {
+        ReentrantReadWriteLock roomLock = getRoomLock(roomId);
+
+        roomLock.readLock().lock();
+        try {
+            return roomReservationRepository.findByRoomId(roomId);
+        } finally {
+            roomLock.readLock().unlock();
+        }
+    }
+
+    public List<RoomReservation> getUserReservations(long userId) {
+        return roomReservationRepository.findByUserId(userId);
+    }
+
+    private ReentrantReadWriteLock getRoomLock(long roomId) {
+        return roomLocks.computeIfAbsent(roomId, k -> new ReentrantReadWriteLock());
+    }
+
+    private void validateReservationTime(LocalTime startTime, LocalTime endTime) {
+        if (startTime.isAfter(endTime) || startTime.equals(endTime)) {
+            throw new IllegalArgumentException("시작 시간은 종료 시간보다 이전이어야 합니다.");
+        }
+    }
+
+    private void validateTimeConflict(long roomId, LocalTime startTime, LocalTime endTime) {
+        List<RoomReservation> existingReservations = roomReservationRepository.findByRoomId(roomId);
+
+        for (RoomReservation reservation : existingReservations) {
+            TimeSlice existingTime = reservation.getTime();
+
+            if (isTimeOverlapping(startTime, endTime, existingTime.getStart(), existingTime.getEnd())) {
+                throw new IllegalStateException("해당 시간대에 이미 예약이 있습니다.");
+            }
+        }
+    }
+
+    private boolean isTimeOverlapping(LocalTime start1, LocalTime end1, LocalTime start2, LocalTime end2) {
+        return start1.isBefore(end2) && start2.isBefore(end1);
+    }
+}
+```
+
+### StampedLock 사용시
+
+```java
+@Service
+public class ReservationService {
+    private final RoomReservationRepository roomReservationRepository;
+    private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("HH:mm");
+
+    private final ConcurrentHashMap<Long, ExpiringLock> roomLocks = new ConcurrentHashMap<>();
+
+    // 정리 작업
+    private final ScheduledExecutorService lockCleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "LockCleanup");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static final long LOCK_EXPIRATION_MILLIS = 10 * 60 * 1000;
+    private static final long CLEANUP_INTERVAL_MILLIS = 60 * 1000;
+
+    public ReservationService(final RoomReservationRepository roomReservationRepository) {
+        this.roomReservationRepository = roomReservationRepository;
+    }
+
+    @PostConstruct
+    public void startLockCleaner() {
+        lockCleanupExecutor.scheduleWithFixedDelay(
+                this::cleanupExpiredLocks,
+                CLEANUP_INTERVAL_MILLIS,
+                CLEANUP_INTERVAL_MILLIS,
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        lockCleanupExecutor.shutdown();
+        try {
+            if (!lockCleanupExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                lockCleanupExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            lockCleanupExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public RoomReservation createReservation(final RoomReservationRequestDto request) {
+        LocalTime startTime = LocalTime.parse(request.getFrom(), timeFormatter);
+        LocalTime endTime = LocalTime.parse(request.getTo(), timeFormatter);
+
+        validateReservationTime(startTime, endTime);
+
+        StampedLock roomLock = getRoomLock(request.getRoomId());
+        long stamp = roomLock.writeLock();
+        try {
+            validateTimeConflict(request.getRoomId(), startTime, endTime);
+
+            TimeSlice timeSlice = new TimeSlice(startTime, endTime);
+            RoomReservation reservation = new RoomReservation(timeSlice, request.getUserId(), request.getRoomId());
+
+            return roomReservationRepository.insert(reservation);
+        } finally {
+            roomLock.unlockWrite(stamp);
+        }
+    }
+
+    public List<RoomReservation> getUserReservations(long userId) {
+        return roomReservationRepository.findByUserId(userId);
+    }
+
+    private StampedLock getRoomLock(long roomId) {
+        return roomLocks.computeIfAbsent(roomId, id -> new ExpiringLock()).getLock();
+    }
+
+    private void cleanupExpiredLocks() {
+        try {
+            roomLocks.entrySet().removeIf(entry ->
+                    entry.getValue().isExpired(LOCK_EXPIRATION_MILLIS)
+            );
+        } catch (Exception e) {
+            System.err.println("락 정리 실패: " + e.getMessage());
+        }
+    }
+
+    private void validateReservationTime(LocalTime startTime, LocalTime endTime) {
+        if (startTime.isAfter(endTime) || startTime.equals(endTime)) {
+            throw new IllegalArgumentException("시작 시간은 종료 시간보다 이전이어야 합니다.");
+        }
+    }
+
+    private void validateTimeConflict(long roomId, LocalTime startTime, LocalTime endTime) {
+        List<RoomReservation> existingReservations = roomReservationRepository.findByRoomId(roomId);
+
+        for (RoomReservation reservation : existingReservations) {
+            TimeSlice existingTime = reservation.getTime();
+            if (isTimeOverlapping(startTime, endTime, existingTime.getStart(), existingTime.getEnd())) {
+                throw new IllegalStateException("해당 시간대에 이미 예약이 있습니다.");
+            }
+        }
+    }
+
+    private boolean isTimeOverlapping(LocalTime start1, LocalTime end1, LocalTime start2, LocalTime end2) {
+        return start1.isBefore(end2) && start2.isBefore(end1);
+    }
+}
+```
+
+```java
+
+import java.time.Instant;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
+
+public class ExpiringLock {
+    private final StampedLock lock = new StampedLock();
+    private volatile Instant lastAccessed = Instant.now();
+
+    public StampedLock getLock() {
+        lastAccessed = Instant.now();
+        return lock;
+    }
+
+    public boolean isExpired(long timeoutMillis) {
+        return Instant.now().minusMillis(timeoutMillis).isAfter(lastAccessed);
+    }
+}
+```
+
+진짜 노력했다…
+
+하지만 너무 코테식으로 푼 것일까?
+
+## ThreadLocal 사용 예시 찾아보다가 multi-tenancy를 발견~
+
+5. **데이터베이스 컨텍스트 (Multi-tenancy)**
+
+```java
+@Component
+public class TenantContextHolder {
+    
+    private static final ThreadLocal<String> tenantId = new ThreadLocal<>();
+    
+    public static void setTenantId(String tenant) {
+        tenantId.set(tenant);
+    }
+    
+    public static String getTenantId() {
+        return tenantId.get();
+    }
+    
+    public static void clear() {
+        tenantId.remove();
+    }
+}
+
+// 동적 데이터소스 설정
+@Configuration
+public class MultiTenantDataSourceConfig {
+    
+    @Bean
+    public DataSource dataSource() {
+        return new MultiTenantDataSource();
+    }
+}
+
+public class MultiTenantDataSource implements DataSource {
+    
+    private Map<String, DataSource> dataSources = new HashMap<>();
+    
+    @Override
+    public Connection getConnection() throws SQLException {
+        String tenantId = TenantContextHolder.getTenantId();
+        
+        if (tenantId == null) {
+            throw new SQLException("Tenant ID가 설정되지 않았습니다");
+        }
+        
+        DataSource targetDataSource = dataSources.get(tenantId);
+        if (targetDataSource == null) {
+            throw new SQLException("Tenant [" + tenantId + "]의 데이터소스를 찾을 수 없습니다");
+        }
+        
+        return targetDataSource.getConnection();
+    }
+    
+    // 다른 DataSource 메서드들...
+}
+```
+
+⇒ 실제 사용
+
+각종 ContextHolder에 사용… (UserContextHolder나 TenentContextHolder …)
+
+```java
+public final class TenantContext {
+    private static final Logger log = LoggerFactory.getLogger(TenantContext.class);
+    public TenantContext() {}
+
+    private static final InheritableThreadLocal<String> currentTenant = new InheritableThreadLocal<>();
+    ...
+```
+
+**1. 캐시 기반 데이터소스 관리**
+
+```java
+
+private LoadingCache<String, DataSource> tenantDataSources;
+
+// 캐시에서 데이터소스 조회
+DataSource ds = tenantDataSources.get(tenantCode);
+
+```
+
+**2. ThreadLocal과의 연동**
+
+```java
+
+protected DataSource selectDataSource(String tenantIdentifier) {
+    String tenantCode = TenantContext.getTenantCode();// ThreadLocal에서 조회
+    DataSource ds = tenantDataSources.get(tenantCode);// 캐시에서 데이터소스 조회
+    return ds;
+}
+
+```
+
+**3. 동적 데이터소스 생성**
+
+```java
+
+private DataSource createAndConfigureDataSource(String tenantCode) {
+    DataSourceInfo dataSourceInfo = fetchSchema(tenantCode);// 메타정보 조회
+
+// HikariDataSource 동적 생성
+    HikariDataSource ds = dataSourceProperties.initializeDataSourceBuilder()
+        .username(dataSourceInfo.getUserName())
+        .password(password)
+        .url(dataSourceInfo.getPrefixUrl())
+        .build();
+}
+
+```
+
+**4. 캐시 설정 및 리소스 관리**
+
+- `maximumSize`: 최대 100개 테넌트 데이터소스 캐싱
+- `expireAfterAccess`: 10분 미사용시 자동 해제
+- `removalListener`: 캐시에서 제거될 때 HikariDataSource 정리
+
+**전체 플로우**
+
+1. HTTP 요청 → 필터/인터셉터에서 `TenantContext.setTenantCode()`
+2. JPA/Hibernate 트랜잭션 시작 → `selectDataSource()` 호출
+3. `TenantContext.getTenantCode()`로 현재 스레드의 테넌트 코드 조회
+4. 캐시에서 해당 테넌트의 데이터소스 조회 (없으면 동적 생성)
+5. 해당 데이터소스로 DB 연결
+
+### ThreadLocal은 상속이 가능하다!
+
+**부모 스레드에서 자식 스레드로 값이 자동 상속**되는 ThreadLocal
+
+**일반 ThreadLocal**
+
+```java
+
+ThreadLocal<String> threadLocal = new ThreadLocal<>();
+
+// 메인 스레드에서 값 설정
+threadLocal.set("main-value");
+
+// 새 스레드 생성 시 값이 상속되지 않음
+new Thread(() -> {
+    System.out.println(threadLocal.get());// null 출력
+}).start();
+
+```
+
+**InheritableThreadLocal**
+
+```java
+
+InheritableThreadLocal<String> inheritableThreadLocal = new InheritableThreadLocal<>();
+
+// 메인 스레드에서 값 설정
+inheritableThreadLocal.set("main-value");
+
+// 새 스레드 생성 시 값이 자동 상속됨
+new Thread(() -> {
+    System.out.println(inheritableThreadLocal.get());// "main-value" 출력
+}).start();
+
+```
+
+## 멀티테넌시에서 사용하는 이유
+
+**비동기 처리 시나리오**
+
+```java
+
+// HTTP 요청 스레드에서
+TenantContext.setTenantCode("tenant-A");
+
+// 비동기 작업 실행
+CompletableFuture.supplyAsync(() -> {
+// 자식 스레드에서도 tenant-A가 유지됨
+    String tenantCode = TenantContext.getTenantCode();// "tenant-A"
+    return someService.processData();// 올바른 테넌트 DB 사용
+});
+
+// @Async 메서드 호출 시에도 테넌트 정보 유지
+@Async
+public void processAsync() {
+    String tenantCode = TenantContext.getTenantCode();// 부모 스레드 값 상속
+}
+
+```
+
+## 상속 시점과 방식
+
+**상속 시점:** 자식 스레드가 **생성되는 순간**에 부모의 값을 복사
+
+```java
+
+InheritableThreadLocal<String> context = new InheritableThreadLocal<>();
+
+context.set("parent-value");
+
+Thread childThread = new Thread(() -> {
+// 스레드 생성 시점의 부모 값이 복사됨
+    System.out.println(context.get());// "parent-value"
+
+    context.set("child-modified");
+    System.out.println(context.get());// "child-modified"
+});
+
+childThread.start();
+childThread.join();
+
+// 부모 스레드는 영향 받지 않음
+System.out.println(context.get());// 여전히 "parent-value"
+
+```
+
+**1. 스레드 풀 환경에서의 문제**
+
+```java
+
+// 문제가 될 수 있는 상황
+ExecutorService executor = Executors.newFixedThreadPool(5);
+
+TenantContext.setTenantCode("tenant-A");
+executor.submit(() -> {
+// 스레드 풀의 재사용된 스레드는 이전 값을 가질 수 있음
+    String tenant = TenantContext.getTenantCode();// 예상과 다를 수 있음
+});
+
+```
+
+**2. 메모리 누수 위험**
+
+- 자식 스레드가 오래 살아있으면 부모의 객체가 GC되지 않을 수 있음
+- 반드시 `clear()` 호출 필요
+
+멀티테넌시에서는 **비동기 작업이나 내부적으로 새 스레드를 생성하는 경우**에 테넌트 정보가 자동으로 전파되어 매우 유용!
