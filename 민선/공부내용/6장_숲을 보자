@@ -1,0 +1,1481 @@
+## **서버와 동시 실행**
+
+동시에 실행하면 동일 수의 요청을 처리하는데 가능한 스레드풀의 크기 배만큼 시간이 더 걸린다~
+
+### **서버가 동시에 요청처리하는 방법**
+
+클라이언트 요청마다 스레드를 할당 ⇒ 스프링 디폴트
+
+비동기 IO(혹은 논블로킹 IO) ⇒ 리액트,Node.js 디폴트
+
+# 동시성 문제가 생길때가 언제냐!
+
+### 동시성(**concurrency**) 문제
+
+서로 다른 두 스레드가 동시에 같은 데이터를 조회/수정할때 동시성 문제가 생김
+
+```java
+public class Increaser {
+    private int count = 0;
+
+    public void inc() {
+        count = count + 1;
+    }
+
+    public int getCount() {
+        return count;
+    }
+}
+```
+
+```java
+Increaser increaser = new Increaser();
+Thread[] threads = new Thread[100];
+
+for (int i = 0; i < 100; i++) {
+    Thread t = new Thread(() -> {
+        for (int j = 0; j < 100; j++) {
+            increaser.inc();
+        }
+    });
+    threads[i] = t;
+    t.start();
+}
+
+for (Thread t : threads) {
+    t.join();
+}
+
+System.out.println(increaser.getCount());
+
+```
+
+100의 스레드를 생성하고
+
+스레드는 increaser.inc()를 100번 실행함~
+
+100*100=10000번의 증가 연산이 실행되어야 함~~
+
+but 실제 결과 : 9982, 9973처럼 **매번 다르고 10000보다 작게 나옴**
+
+### ⚠️ 원인
+
+- `count = count + 1` 코드는 3단계임
+    1. `count` 값을 읽음
+    2. 1을 더함
+    3. 결과를 `count`에 씀
+- `count`가 5일 때, 두 개의 스레드가 동시에 `count + 1`을 수행하면 둘 다 6을 저장해서 실제로는 1만 증가
+
+### 🛠해결
+
+`synchronized`, `Lock`, 또는 `AtomicInteger` 같은 **동기화 메커니즘**
+
+## Thread Interference
+
+```java
+public class PayService {
+    private Long payId; // 🚨 인스턴스 필드 - 스레드 안전하지 않음
+    
+    public PayResp pay(PayRequest req) {
+        this.payId = genPayId();                 
+        saveTemp(this.payId, req);               
+        PayResp resp = sendPayData(this.payId);  
+        applyResponse(resp);                     
+        return resp;
+    }
+    
+    private void applyResponse(PayResp resp) {
+        PayData payData = createPayDataFromResp(resp);        
+        updatePayData(this.payId, payData); // 🚨 잘못된 payId 사용 가능     
+    }
+}
+```
+
+**인스턴스 필드 `payId`를 여러 스레드가 공유**하여 동시성 문제 발생!!!
+
+스레드 1: payId = 1 생성 → 임시저장 → 결제요청
+스레드 2:                    payId = 2 생성 (덮어씀)
+스레드 1:                                      updatePayData(2, 고객A데이터) ❌
+
+- **고객 A**: 결제 결과 손실
+- **고객 B**: 잘못된 데이터로 덮어써짐
+- **심각한 데이터 무결성 문제**
+
+### 해결 방법
+
+```java
+public PayResp pay(PayRequest req) {
+    Long payId = genPayId(); // 지역변수로 변경 => thread-local이랑 약간 개념이 유사해진...
+    saveTemp(payId, req);               
+    PayResp resp = sendPayData(payId);  
+    applyResponse(resp, payId); // payId 전달
+    return resp;
+}
+
+private void applyResponse(PayResp resp, Long payId) {
+    PayData payData = createPayDataFromResp(resp);        
+    updatePayData(payId, payData);     
+}
+```
+
+## DB의 동시성 문제 (Concurrency Problems)
+
+referrence: [What is Database Concurrency? - IT Glossary | SolarWinds](https://www.solarwinds.com/resources/it-glossary/database-concurrency)
+
+### 1. **Dirty Read (더티 리드)**
+
+아직 커밋되지 않은 다른 트랜잭션의 데이터를 읽는 문제
+
+```sql
+
+T1: UPDATE account SET balance = 1000 WHERE id = 1;
+T2: SELECT balance FROM account WHERE id = 1;-- 1000을 읽음 (아직 커밋 안됨)
+T1: ROLLBACK;-- 실제로는 원래 값으로 돌아감
+
+```
+
+### 2. **Non-Repeatable Read (반복 불가능한 읽기)**
+
+같은 트랜잭션 내에서 동일한 데이터를 두 번 읽었는데 다른 값이 나오는 문제 
+
+```sql
+
+T1: SELECT balance FROM account WHERE id = 1;-- 500 읽음
+T2: UPDATE account SET balance = 1000 WHERE id = 1;
+T2: COMMIT;
+T1: SELECT balance FROM account WHERE id = 1;-- 1000 읽음 (다른 값!)
+
+```
+
+### 3. **Phantom Read (팬텀 리드)**
+
+같은 조건으로 두 번 조회했는데 결과 행의 수가 달라지는 문제
+
+```sql
+
+T1: SELECT * FROM employee WHERE dept = 'IT';-- 5명
+T2: INSERT INTO employee VALUES ('John', 'IT');
+T2: COMMIT;
+T1: SELECT * FROM employee WHERE dept = 'IT';-- 6명 (새로운 행!)
+
+```
+
+### 4. **Lost Update (갱신 손실)**
+
+여러 트랜잭션이 동시에 같은 데이터를 수정할 때 일부 수정사항이 손실되는 문제
+
+```sql
+
+T1: SELECT balance FROM account WHERE id = 1;-- 1000
+T2: SELECT balance FROM account WHERE id = 1;-- 1000
+T1: UPDATE account SET balance = 1000 + 100;-- 1100
+T2: UPDATE account SET balance = 1000 + 200;-- 1200 (T1의 +100이 손실!)
+
+```
+
+### 해결 방법: Transaction Isolation Level
+
+Lock-based Protocol, Timestamp ordering, Optimistic concurrency control 등의 기법 사용 [Concurrency problems in DBMS Transactions - GeeksforGeeks](https://www.geeksforgeeks.org/dbms/concurrency-problems-in-dbms-transactions/)
+
+- **READ UNCOMMITTED**: 모든 문제 발생가능
+- **READ COMMITTED**: Dirty Read 방지
+- **REPEATABLE READ**: Dirty Read, Non-Repeatable Read 방지
+- **SERIALIZABLE**: 모든 문제 방지
+
+🤔근데 다른 분들 말 다 들어보고 찾아봐도 DB에서 동시성 문제를 해결하는데는 없고 애플리케이션단에서 하던데?
+
+### 애플리케이션 레벨 처리가 주류인 이유~
+
+**성능 vs 일관성 트레이드오프**
+
+- **SERIALIZABLE**: 완벽하지만 성능 최악 (거의 순차처리)
+- **READ COMMITTED**: 기본값, 성능 좋음
+- 대부분 DB는 **READ COMMITTED** 기본값으로 사용
+
+**DB 격리 수준 ↑** = **성능 ↓** = **사용자 경험 ↓**
+
+**비즈니스 로직에 맞는 세밀한 제어** 가능
+
+**분산 환경**에서 DB 격리 수준만으론 한계
+
+**마이크로서비스** 환경에서 서비스 간 동시성 제어 필요
+
+### 2. **실제 사용되는 애플리케이션 동시성 패턴**
+
+### **낙관적 락 (Optimistic Lock)**
+
+```java
+
+@Entity
+public class Account {
+    @Version
+    private Long version;// JPA가 자동으로 충돌 검사
+    private BigDecimal balance;
+}
+
+// 수정 시 version 체크해서 충돌 감지
+
+```
+
+### **비관적 락 (Pessimistic Lock)**
+
+```java
+
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+Account findByIdForUpdate(Long id);
+
+```
+
+### **분산 락**
+
+```java
+
+// Redis 기반
+@RedisLock(key = "account:#{#accountId}")
+public void transfer(Long accountId, BigDecimal amount) {
+// 처리 로직
+}
+
+```
+
+### **이벤트 기반 처리**
+
+```java
+
+// 비동기로 처리해서 동시성 문제 회피
+@EventListener
+public void handlePaymentEvent(PaymentEvent event) {
+// 순차적으로 처리
+}
+
+```
+
+### 3. **실무 접근법**
+
+```
+
+1. DB: READ COMMITTED (기본)
+2. 애플리케이션: 비즈니스 요구사항에 맞는 락 전략
+3. 캐시: Redis 분산 락
+4. 아키텍처: 이벤트 기반, CQRS 등
+
+```
+
+## 프로세스 수준에서의 동시 접근 제어
+
+**단일 프로세스 내에서 동시성 제어**
+
+### 🔒 잠금(lock)을 이용한 접근 제어
+
+프로세스 수준에서 데이터를 동시에 수정하는 것을 막기 위한 일반적인 방법은 **잠금(lock)** 을 사용하는 것이다. 잠금을 사용하면 **공유 자원에 접근하는 스레드를 한 번에 하나로 제한**할 수 있다.
+
+잠금을 사용하는 일반적인 흐름은 다음과 같다:
+
+1. **잠금을 획득한다**
+2. **공유 자원에 접근 (임계 영역)**
+3. **잠금을 해제한다**
+
+<aside>
+💡
+
+**Critical Section 임계 영역**
+
+**동시에 둘 이상의 스레드나 프로세스가 접근하면 안 되는 공유 자원(메모리, 파일 …)에 접근하는 코드 영역**
+
+</aside>
+
+`ReentrantLock`을 사용해 동시에 HashMap을 수정하는 것을 막는 코드
+
+```java
+
+public class UserSessions {
+    private Lock lock = new ReentrantLock();
+    private Map<String, UserSession> sessions = new HashMap<>();
+
+    public void addUserSession(UserSession session) {
+        lock.lock(); // 잠금 획득 (대기)
+        try {
+            sessions.put(session.getSessionId(), session); // 공유 자원 접근
+        } finally {
+            lock.unlock(); // 잠금 해제
+        }
+    }
+
+    public UserSession getUserSession(String sessionId) {
+        lock.lock();
+        try {
+            return sessions.get(sessionId);
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+
+```
+
+`ReentrantLock`을 이용하여 `sessions`라는 `HashMap`에 여러 스레드가 동시에 접근하여 데이터를 수정하거나 읽을 때 발생할 수 있는 **race condition을** 방지
+
+책에서 자꾸 헷갈리게 해서 짚고넘어감…
+
+<aside>
+💡
+
+## 동시성 제어 레벨 구분
+
+### 1. **스레드 수준 (Thread Level)** = **프로세스 내부**
+
+- **같은 JVM 안에서** 여러 스레드 간 동시성 제어
+- `synchronized`, `ReentrantLock`, `volatile`, `AtomicInteger` 등
+- **메모리 공유** 기반
+
+### 2. **프로세스 수준 (Process Level)** = **서버 간/인스턴스 간**
+
+- **여러 JVM간** 동시성 제어 ⇒ 😊MSA에서 모듈 하나당 jvm 하나!!
+- 분산 락, 파일 락, Redis 락 등
+- **네트워크 통신** 기반
+
+### 3. **애플리케이션 수준 (Application Level)**
+
+- **아키텍처 설계**로 동시성 문제 회피
+- 이벤트 기반, CQRS, 메시지 큐, 단일 스레드 등
+
+### 4. **DB 수준 (Database Level)**
+
+- **데이터베이스**에서 제공하는 동시성 제어
+- 트랜잭션, 비관적 락, 낙관적 락, 격리 수준 등
+</aside>
+
+## 자꾸 헷갈려서 총정리를 해봄
+
+일단 처음 본 ReentrantLock
+
+<aside>
+🧐
+
+### Re-entrant = Re + Entrant
+
+"다시 들어갈 수 있는”
+
+영어단어 그자체를 이해하는게 아니면 기억에 잘 남지 않아요…
+
+같은 사람(스레드)은 자신이 이미 가지고 있는 락을 부담 없이 다시 사용할 수 있다!
+
+### ❌ 재진입 불가능한 락 (가상의 예시)
+
+```jsx
+// 이런 락이 있다면...
+SimpleLock lock = new SimpleLock();
+
+public void 엄마가_요리하기() {
+    lock.lock();  // 부엌 점유
+    try {
+        재료_준비하기();
+        조미료_가져오기();  // 이 메서드도 부엌을 써야 함
+    } finally {
+        lock.unlock();
+    }
+}
+
+public void 조미료_가져오기() {
+    lock.lock();  // 💥 데드락! 엄마가 이미 부엌을 쓰고 있는데 
+                  //    엄마 자신이 다시 부엌에 들어가려고 함
+    try {
+        소금_가져오기();
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+### ✅ 재진입 가능한 락 (ReentrantLock)
+
+```java
+
+ReentrantLock lock = new ReentrantLock();
+
+public void 엄마가_요리하기() {
+    lock.lock();  // 부엌 점유 (카운트: 1)
+    try {
+        재료_준비하기();
+        조미료_가져오기();  // 같은 사람(스레드)이니까 들어갈 수 있음
+    } finally {
+        lock.unlock();  // 카운트: 0, 실제로 부엌 비움
+    }
+}
+
+public void 조미료_가져오기() {
+    lock.lock();  // ✅ 성공! 엄마니까 들어갈 수 있음 (카운트: 2)
+    try {
+        소금_가져오기();
+    } finally {
+        lock.unlock();  // 카운트: 1, 아직 엄마가 부엌 사용 중
+    }
+}
+```
+
+애초에 왜 재진입을 해야하는데…? 싶어서 찾아본
+
+### 재진입을 해야하는 경우의 수
+
+### 1. **메서드 체인 호출**
+
+```java
+
+public void 큰일_처리하기() {
+    lock.lock();
+    try {
+        작은일1_하기();// 이것도 락이 필요
+        작은일2_하기();// 이것도 락이 필요
+        작은일3_하기();// 이것도 락이 필요
+    } finally {
+        lock.unlock();
+    }
+}
+
+```
+
+### 2. **재귀 함수**
+
+```java
+
+public void 폴더_정리하기(Folder folder) {
+    lock.lock();
+    try {
+        파일_정리하기(folder);
+        for (Folder 하위폴더 : folder.getSubFolders()) {
+            폴더_정리하기(하위폴더);// 재귀 호출!
+        }
+    } finally {
+        lock.unlock();
+    }
+}
+
+```
+
+### 3. **콜백 함수**
+
+```java
+
+public void 이벤트_처리하기() {
+    lock.lock();
+    try {
+// 이벤트 처리 중에 콜백이 호출될 수 있음
+        콜백함수_호출();// 이 함수가 다시 락을 요청할 수 있음
+    } finally {
+        lock.unlock();
+    }
+}
+
+```
+
+</aside>
+
+# 동시성 제어 4레벨 정리본
+
+## 🧵 스레드 레벨 (Thread Level)
+
+> 범위: 하나의 JVM 안에서 여러 스레드 간 동시성 제어
+> 
+
+## Java 기준~
+
+### **Atomic 클래스들**
+
+```java
+
+AtomicInteger, AtomicLong, AtomicBoolean, AtomicReference
+AtomicIntegerArray, AtomicLongArray, AtomicReferenceArray
+LongAdder, DoubleAdder// 높은 경합 상황에서 더 빠름// 예시: LongAdder vs AtomicLong
+LongAdder adder = new LongAdder();
+adder.increment();// 내부적으로 여러 Cell로 분산하여 경합 줄임
+
+```
+
+### **락**
+
+```java
+
+// ReadWriteLock - 읽기는 동시, 쓰기는 배타
+ReadWriteLock rwLock = new ReentrantReadWriteLock();
+rwLock.readLock().lock();// 여러 스레드 동시 읽기 가능
+rwLock.writeLock().lock();// 배타적 쓰기// StampedLock - 낙관적 읽기 지원 (Java 8+)
+StampedLock sl = new StampedLock();
+long stamp = sl.tryOptimisticRead();// 낙관적 읽기
+if (!sl.validate(stamp)) {// 검증 실패 시
+    stamp = sl.readLock();// 실제 락 획득
+}
+
+```
+
+### **동시성 컬렉션**
+
+```java
+
+// Lock-free 자료구조들
+ConcurrentHashMap<String, Integer> map = new ConcurrentHashMap<>();
+ConcurrentLinkedQueue<String> queue = new ConcurrentLinkedQueue<>();
+ConcurrentSkipListMap<String, Integer> sortedMap = new ConcurrentSkipListMap<>();
+
+// Blocking 자료구조들
+BlockingQueue<String> bq = new ArrayBlockingQueue<>(100);
+bq.put("item");// 큐가 가득 차면 블로킹
+bq.take();// 큐가 비어있으면 블로킹
+
+```
+
+### **동기화 유틸리티들**
+
+```java
+
+// CountDownLatch - N개 작업 완료 대기
+CountDownLatch latch = new CountDownLatch(3);
+latch.countDown();// 카운트 감소
+latch.await();// 0이 될 때까지 대기// CyclicBarrier - N개 스레드가 특정 지점에서 만날 때까지 대기
+CyclicBarrier barrier = new CyclicBarrier(3, () -> System.out.println("All arrived!"));
+barrier.await();
+
+// Semaphore - 허가증 기반 접근 제어
+Semaphore semaphore = new Semaphore(2);// 2개 허가증
+semaphore.acquire();// 허가증 획득
+semaphore.release();// 허가증 반납// Phaser - 단계별 동기화 (Java 7+)
+Phaser phaser = new Phaser(3);// 3개 참가자
+phaser.arriveAndAwaitAdvance();// 현재 단계 완료 후 다음 단계 대기
+
+```
+
+### **Fork/Join 프레임워크**
+
+```java
+
+// 분할 정복 알고리즘에 최적화
+class MergeSort extends RecursiveAction {
+    @Override
+    protected void compute() {
+        if (array.length < THRESHOLD) {
+// 직접 정렬
+        } else {
+// 분할 후 병렬 처리
+            invokeAll(new MergeSort(left), new MergeSort(right));
+        }
+    }
+}
+
+ForkJoinPool pool = new ForkJoinPool();
+pool.invoke(new MergeSort(array));
+
+```
+
+### **CompletableFuture와 비동기 처리**
+
+```java
+
+CompletableFuture<String> future = CompletableFuture
+    .supplyAsync(() -> "Hello")
+    .thenCompose(s -> CompletableFuture.supplyAsync(() -> s + " World"))
+    .thenApply(String::toUpperCase);
+
+// 여러 작업 조합
+CompletableFuture.allOf(future1, future2, future3).join();
+
+```
+
+### **Thread-Local Storage**
+
+```java
+
+// 스레드별 독립적인 변수
+ThreadLocal<SimpleDateFormat> formatter = ThreadLocal.withInitial(
+    () -> new SimpleDateFormat("yyyy-MM-dd")
+);
+
+// 상속 가능한 ThreadLocal
+InheritableThreadLocal<String> context = new InheritableThreadLocal<>();
+
+```
+
+### **메모리 모델 기반 제어**
+
+```java
+
+// VarHandle - 메모리 액세스에 대한 세밀한 제어 (Java 9+)
+VarHandle vh = MethodHandles.lookup()
+    .findVarHandle(MyClass.class, "field", int.class);
+
+vh.setVolatile(obj, newValue);// volatile 쓰기
+vh.compareAndSet(obj, expected, new);// CAS 연산
+vh.getAndAdd(obj, delta);// atomic add// MethodHandle을 통한 동적 메서드 호출
+MethodHandle mh = lookup.findVirtual(String.class, "length", methodType(int.class));
+
+```
+
+### **Lock-Free 알고리즘 패턴**
+
+```java
+
+// Treiber Stack (Lock-free Stack)
+public class LockFreeStack<T> {
+    private final AtomicReference<Node<T>> head = new AtomicReference<>();
+
+    public void push(T item) {
+        Node<T> newNode = new Node<>(item);
+        Node<T> currentHead;
+        do {
+            currentHead = head.get();
+            newNode.next = currentHead;
+        } while (!head.compareAndSet(currentHead, newNode));
+    }
+}
+
+// Michael & Scott Queue (Lock-free Queue)// ConcurrentLinkedQueue의 기반 알고리즘
+
+```
+
+### synchronized
+
+**언제 써?** 간단한 메서드나 블록을 보호할 때
+
+**어떻게?** JVM이 자동으로 lock/unlock 관리
+
+**특징**:
+
+- 자동 lock/unlock (try-finally 불필요)
+- JVM 차원에서 관리 (바이트코드 monitorenter/monitorexit)
+- 블로킹 방식, 타임아웃 없음
+- 재진입 가능 (같은 스레드가 중복 획득 가능)
+
+**장점**: 코드 간단, 자동 관리
+**단점**: 유연성 부족, 타임아웃/인터럽트 불가, 공정성 제어 불가
+
+```java
+
+public class SimpleCounter {
+    private int count = 0;
+
+// 메서드 레벨 동기화
+    public synchronized void increment() {
+        count++;
+    }
+
+// 블록 레벨 동기화
+    public void decrement() {
+        synchronized(this) {
+            count--;
+        }
+    }
+
+// 재진입 예시
+    public synchronized void reentrantExample() {
+        anotherSyncMethod();// 같은 스레드가 다시 락 획득 가능
+    }
+
+    public synchronized void anotherSyncMethod() {
+        System.out.println("재진입 성공!");
+    }
+}
+
+```
+
+### ReentrantLock
+
+**언제 써?** 세밀한 제어가 필요할 때 (타임아웃, 상태 확인 등)
+
+**어떻게?** 명시적으로 lock()/unlock() 호출
+
+**특징**:
+
+- 타임아웃 지원 (`tryLock(timeout)`)
+- 락 상태 확인 (`isLocked()`, `isHeldByCurrentThread()`)
+- 공정성 설정 가능 (`new ReentrantLock(true)`)
+- 인터럽트 응답 (`lockInterruptibly()`)
+- 조건 변수 지원 (`Condition`)
+
+**장점**: 유연한 제어, 데드락 방지 기능
+**단점**: 코드 복잡, unlock 누락 위험
+
+```java
+
+public class AdvancedCounter {
+    private int count = 0;
+    private final ReentrantLock lock = new ReentrantLock(true);// 공정성
+    private final Condition notEmpty = lock.newCondition();
+
+    public void increment() {
+        lock.lock();
+        try {
+            count++;
+            notEmpty.signalAll();// 대기 중인 스레드 깨우기
+        } finally {
+            lock.unlock();
+        }
+    }
+
+// 타임아웃 있는 락 시도
+    public boolean tryIncrement() {
+        try {
+            if (lock.tryLock(5, TimeUnit.SECONDS)) {
+                try {
+                    count++;
+                    return true;
+                } finally {
+                    lock.unlock();
+                }
+            }
+            return false;
+        } catch (InterruptedException e) {
+            return false;
+        }
+    }
+
+// 조건부 대기
+    public void waitUntilNotEmpty() throws InterruptedException {
+        lock.lock();
+        try {
+            while (count == 0) {
+                notEmpty.await();// count > 0까지 대기
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+
+```
+
+### volatile
+
+**언제 써?** 단순한 플래그나 상태값 공유할 때
+
+**어떻게?** 변수 앞에 volatile 키워드 붙임
+
+**특징**:
+
+- 가시성 보장 (모든 스레드가 최신 값 확인)
+- 원자성 보장 안 됨 (읽기/쓰기만 원자적)
+- CPU 캐시 우회해서 메인 메모리 직접 접근
+
+**장점**: 간단, 성능 좋음
+**단점**: 복합 연산 (count++) 안전하지 않음
+
+```java
+
+public class StatusManager {
+    private volatile boolean running = true;// 가시성 보장
+    private volatile String status = "READY";
+
+    public void stop() {
+        running = false;// 모든 스레드가 즉시 확인 가능
+    }
+
+    public boolean isRunning() {
+        return running;// 항상 최신 값
+    }
+}
+
+```
+
+### Atomic 타입들
+
+**언제 써?** 간단한 숫자 연산을 락 없이 안전하게 할 때
+
+**어떻게?** CAS(Compare-And-Swap) 연산 사용
+
+**특징**:
+
+- 락 없는 원자적 연산
+- 높은 성능 (스핀락 방식)
+- 다양한 타입 지원 (Integer, Long, Boolean, Referenc
+
+**장점**: 락보다 빠름, 데드락 없음
+**단점**: 복잡한 로직엔 부적합, 메모리 사용량 높음
+
+```java
+
+public class AtomicCounters {
+    private final AtomicInteger counter = new AtomicInteger(0);
+    private final AtomicReference<String> status = new AtomicReference<>("READY");
+    private final LongAdder highContentionCounter = new LongAdder();// 경합 많을 때
+
+    public int incrementAndGet() {
+        return counter.incrementAndGet();// 원자적 +1
+    }
+
+// CAS 연산
+    public boolean updateStatus(String expected, String newValue) {
+        return status.compareAndSet(expected, newValue);
+    }
+
+// 높은 경합 상황에서 더 빠름
+    public void incrementHighContention() {
+        highContentionCounter.increment();
+    }
+}
+
+```
+
+### ReadWriteLock
+
+**언제 써?** 읽기는 많고 쓰기는 적을 때
+
+**어떻게?** 읽기용/쓰기용 락 분리
+
+**특징**:
+
+- 읽기끼리는 동시 실행 가능
+- 쓰기는 배타적
+- 쓰기 중엔 읽기도 차단
+
+**장점**: 읽기 성능 향상
+**단점**: 쓰기 기아 현상 가능, 복잡성 증가
+
+```java
+
+public class CacheManager {
+    private final Map<String, Object> cache = new HashMap<>();
+    private final ReadWriteLock lock = new ReentrantReadWriteLock();
+    private final Lock readLock = lock.readLock();
+    private final Lock writeLock = lock.writeLock();
+
+    public Object get(String key) {
+        readLock.lock();// 여러 스레드 동시 읽기 가능
+        try {
+            return cache.get(key);
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    public void put(String key, Object value) {
+        writeLock.lock();// 쓰기는 혼자만
+        try {
+            cache.put(key, value);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+}
+
+```
+
+### 세마포어(Semaphore) - 접근 수 제한
+
+  **** 동시에 실행할 수 있는 스레드 수를 제한
+
+- permit(허용 개수)을 이용해 생성
+- 이진 세마포어(1개) vs 계수 세마포어(N개)
+- P 연산(acquire) / V 연산(release)
+- N개의 허가 관리
+- acquire()/release()로 허가 획득/반환
+- 타임아웃 지원
+
+**장점**: 리소스 사용량 제어 가능
+**단점**: 허가 관리 복잡
+
+```java
+
+@Service
+public class ExternalApiClient {
+    private final Semaphore semaphore = new Semaphore(5);// 최대 5개
+
+    public String callApi(String request) {
+        try {
+            semaphore.acquire();// 허가 획득// 외부 API 호출 (최대 5개 동시 실행)
+            return httpClient.call(request);
+        } catch (InterruptedException e) {
+            throw new RuntimeException("중단됨", e);
+        } finally {
+            semaphore.release();// 허가 반환
+        }
+    }
+}
+
+```
+
+### ThreadLocal
+
+**언제 써?** 스레드별로 독립적인 값 저장할 때
+
+**어떻게?** 스레드마다 별도 저장 공간 제공
+
+**특징**:
+
+- 스레드별 독립 변수
+- 상속 가능 (InheritableThreadLocal)
+
+**장점**: 동시성 문제 없음
+**단점**: 메모리 누수 위험, 스레드 풀에서 문제 가능
+
+```java
+
+public class UserContextHolder {
+    private static final ThreadLocal<UserContext> contextHolder = new ThreadLocal<>();
+
+    public static void setContext(UserContext context) {
+        contextHolder.set(context);
+    }
+
+    public static UserContext getContext() {
+        return contextHolder.get();
+    }
+
+    public static void clear() {
+        contextHolder.remove();// 반드시 정리!
+    }
+}
+
+```
+
+## 커스텀도 가능하다~
+
+Atomic 연산을 CAS말고도 알아보자~
+
+⇒ 하고 CAS ABA 문제 해결책이 gc랑 비슷하길래 안드로메다로 감
+
+## 🖥️ 프로세스 레벨 (Process Level)
+
+> 범위: 여러 JVM(서버) 간 동시성 제어
+> 
+
+### Redis 분산 락
+
+**언제 써?** 여러 서버에서 같은 작업 중복 실행 방지할 때
+
+**어떻게?** Redis의 SETNX 명령어 이용
+
+**특징**:
+
+- 빠른 속도
+- TTL로 자동 해제
+- 네트워크 장애 시 문제 가능
+
+**장점**: 성능 좋음, 구현 간단
+**단점**: Redis 의존성, 네트워크 장애 위험
+
+```java
+
+@Component
+public class RedisDistributedLock {
+
+    @Autowired
+    private RedisTemplate<String, String> redisTemplate;
+
+    public boolean tryLock(String key, String value, long expireMs) {
+        Boolean result = redisTemplate.opsForValue()
+            .setIfAbsent(key, value, Duration.ofMillis(expireMs));
+        return Boolean.TRUE.equals(result);
+    }
+
+    public void unlock(String key, String value) {
+// 자신이 건 락인지 확인 후 해제
+        String script =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then " +
+            "return redis.call('del', KEYS[1]) " +
+            "else return 0 end";
+        redisTemplate.execute(new DefaultRedisScript<>(script, Long.class),
+            Arrays.asList(key), value);
+    }
+}
+
+@Service
+public class PaymentService {
+    public void processPayment(String orderId) {
+        String lockKey = "payment:lock:" + orderId;
+        String lockValue = UUID.randomUUID().toString();
+
+        if (distributedLock.tryLock(lockKey, lockValue, 30000)) {
+            try {
+// 결제 처리 (30초 안에 완료)
+                processPaymentInternal(orderId);
+            } finally {
+                distributedLock.unlock(lockKey, lockValue);
+            }
+        } else {
+            throw new PaymentLockException("이미 결제 진행 중");
+        }
+    }
+}
+
+```
+
+### DB 기반 분산 락
+
+**언제 써?** 안정성이 최우선이고 Redis 도입이 어려울 때
+
+**어떻게?** DB 테이블을 락으로 사용
+
+**특징**:
+
+- 높은 안정성
+- 트랜잭션 보장
+- 성능이 상대적으로 느림
+
+**장점**: 안정성, 트랜잭션과 통합
+**단점**: 성능 낮음, DB 부하
+
+```java
+
+@Entity
+@Table(name = "distributed_locks")
+public class DistributedLock {
+    @Id
+    private String lockKey;
+    private String owner;
+    private LocalDateTime expiresAt;
+}
+
+@Service
+public class DatabaseDistributedLock {
+
+    @Transactional
+    public boolean tryLock(String key, String owner, Duration duration) {
+        try {
+            DistributedLock lock = new DistributedLock();
+            lock.setLockKey(key);
+            lock.setOwner(owner);
+            lock.setExpiresAt(LocalDateTime.now().plus(duration));
+
+            lockRepository.save(lock);// 유니크 제약으로 중복 방지
+            return true;
+        } catch (DataIntegrityViolationException e) {
+            return false;// 이미 락 존재
+        }
+    }
+
+    @Transactional
+    public void unlock(String key, String owner) {
+        lockRepository.deleteByLockKeyAndOwner(key, owner);
+    }
+}
+
+```
+
+### 파일 기반 락
+
+**언제 써?** 단순한 환경에서 임시로 사용할 때
+
+**어떻게?** 파일 시스템의 락 파일 이용
+
+**특징**:
+
+- 구현 간단
+- 외부 의존성 없음
+- 안정성 부족
+
+**장점**: 간단, 의존성 없음
+**단점**: 안정성 부족, 스케일링 어려움
+
+```java
+
+public class FileLock {
+    private final String lockFilePath;
+
+    public boolean tryLock() {
+        try {
+            File lockFile = new File(lockFilePath);
+            return lockFile.createNewFile();// 원자적 생성
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    public void unlock() {
+        new File(lockFilePath).delete();
+    }
+}
+
+```
+
+---
+
+## 🏗️ 애플리케이션 레벨 (Application Level)
+
+> 범위: 아키텍처 설계로 동시성 문제 회피
+> 
+
+### 이벤트 기반 비동기 처리
+
+**언제 써?** 즉시 응답 필요하고 뒤에서 처리해도 될 때
+
+**어떻게?** 요청 접수 후 이벤트로 비동기 처리
+
+**특징**:
+
+- 빠른 응답
+- 처리 순서 보장
+- 복잡성 증가
+
+**장점**: 사용자 경험 향상, 부하 분산
+**단점**: 복잡성, 디버깅 어려움
+
+```java
+
+// 즉시 응답
+@PostMapping("/payment")
+public ResponseEntity<String> requestPayment(@RequestBody PaymentRequest request) {
+    eventPublisher.publishEvent(new PaymentEvent(request));
+    return ResponseEntity.ok("결제 요청 접수완료!");
+}
+
+// 비동기 처리
+@EventListener
+@Async
+public void handlePaymentEvent(PaymentEvent event) {
+    paymentService.processPayment(event);// 순차 처리로 동시성 문제 없음
+}
+
+```
+
+### 단일 스레드 + 작업 큐
+
+**언제 써?** 상태 관리가 복잡하고 안전성이 최우선일 때
+
+**어떻게?** 하나의 스레드가 큐에서 순서대로 처리
+
+**특징**:
+
+- 동시성 문제 원천 차단
+- 처리량 제한
+- 단순한 구조
+
+**장점**: 안전성, 디버깅 쉬움
+**단점**: 처리량 제한, 단일 장애점
+
+```java
+
+@Component
+public class OrderProcessor {
+    private final BlockingQueue<OrderTask> taskQueue = new LinkedBlockingQueue<>();
+    private volatile boolean running = true;
+
+    @PostConstruct
+    public void startProcessor() {
+        new Thread(this::processOrders).start();
+    }
+
+    private void processOrders() {
+        while (running) {
+            try {
+                OrderTask task = taskQueue.poll(1, TimeUnit.SECONDS);
+                if (task != null) {
+                    task.execute();// 순차 처리
+                }
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+    }
+
+    public void submitOrder(OrderTask task) {
+        taskQueue.offer(task);
+    }
+}
+
+```
+
+### CQRS 패턴
+
+**언제 써?** 읽기와 쓰기 패턴이 완전 다를 때
+
+**어떻게?** 읽기용 모델과 쓰기용 모델 분리
+
+**특징**:
+
+- 읽기/쓰기 최적화
+- 모델 분리로 복잡성 증가
+- 데이터 동기화 필요
+
+**장점**: 성능 최적화, 확장성
+**단점**: 복잡성, 일관성 관리
+
+```java
+
+// 쓰기 전용 서비스
+@Service
+public class OrderCommandService {
+    public void createOrder(CreateOrderCommand command) {
+        Order order = new Order(command);
+        orderRepository.save(order);
+// 읽기 모델 업데이트 이벤트
+        eventPublisher.publish(new OrderCreatedEvent(order));
+    }
+}
+
+// 읽기 전용 서비스
+@Service
+public class OrderQueryService {
+    public List<OrderView> getOrders(OrderQuery query) {
+        return orderViewRepository.findByQuery(query);
+    }
+}
+
+```
+
+### 메시지 큐 아키텍처
+
+**언제 써?** 마이크로서비스 간 통신, 부하 분산 필요할 때
+
+**어떻게?** 메시지 큐로 작업 분산
+
+**특징**:
+
+- 비동기 처리
+- 서비스 간 결합도 낮춤
+- 메시지 순서 보장 어려움
+
+**장점**: 확장성, 내결함성
+**단점**: 복잡성, 지연 시간
+
+```java
+
+// 메시지 발행
+@Service
+public class PaymentPublisher {
+    public void requestPayment(PaymentRequest request) {
+        PaymentMessage message = new PaymentMessage(request);
+        rabbitTemplate.convertAndSend("payment.queue", message);
+    }
+}
+
+// 메시지 소비
+@RabbitListener(queues = "payment.queue")
+public void handlePayment(PaymentMessage message) {
+    paymentService.process(message);// 순차 처리
+}
+
+```
+
+### 상태 머신 패턴
+
+**언제 써?** 상태 변경이 복잡하고 순서가 중요할 때
+
+**어떻게?** 상태 전환 규칙으로 동시 변경 방지
+
+**특징**:
+
+- 상태 변경 규칙 명확
+- 동시 변경 방지
+- 복잡한 상태 관리
+
+**장점**: 안전한 상태 관리, 명확한 규칙
+**단점**: 복잡성, 확장성 제한
+
+```java
+
+@Component
+public class OrderStateMachine {
+    private final Map<StateTransition, OrderState> transitions = Map.of(
+        new StateTransition(PENDING, PAY), PAID,
+        new StateTransition(PAID, SHIP), SHIPPED,
+        new StateTransition(PENDING, CANCEL), CANCELLED
+    );
+
+    public synchronized boolean changeState(Order order, OrderEvent event) {
+        OrderState currentState = order.getState();
+        OrderState nextState = transitions.get(new StateTransition(currentState, event));
+
+        if (nextState != null) {
+            order.setState(nextState);
+            return true;
+        }
+        return false;// 잘못된 상태 전환
+    }
+}
+
+```
+
+## 🗄️ DB 레벨 (Database Level)
+
+> 범위: 데이터베이스 자체 기능으로 동시성 제어
+> 
+
+<aside>
+💡
+
+### 낙관적 락 vs 비관적 락 (Optimistic Lock vs Pessimistic Lock)
+
+선점 비선점이 나오니까 자꾸 헷갈림
+
+| 개념 | 점유 방식 | 선점/비선점 비유 |
+| --- | --- | --- |
+| **낙관적 락** | 자원 점유 없이 "내가 성공하면 가져갈게" → 실패 시 재시도 | **비선점 느낌** (자원을 뺏는 게 아니라, 조건 맞으면 가져감) |
+| **비관적 락** | 자원을 먼저 락으로 묶고 "다른 놈 못 써" → 점유부터 함 | **선점 느낌** (락 걸어서 남 못 오게 막음) |
+</aside>
+
+### 1. 비관적 락 (Pessimistic Lock)
+
+**언제 써?** 충돌이 자주 일어날 것 같을 때
+
+**어떻게?** 데이터 조회 시 즉시 락 획득
+
+**특징**:
+
+- 즉시 락 획득
+- 트랜잭션 종료까지 유지
+- 대기 시간 발생
+
+**장점**: 확실한 동시성 제어
+**단점**: 성능 저하, 데드락 위험
+
+```java
+
+@Repository
+public interface AccountRepository extends JpaRepository<Account, Long> {
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT a FROM Account a WHERE a.id = :id")
+    Account findByIdForUpdate(@Param("id") Long id);
+}
+
+@Service
+@Transactional
+public class TransferService {
+    public void transfer(Long fromId, Long toId, BigDecimal amount) {
+// 데드락 방지를 위해 ID 순서로 락 획득
+        Long firstId = Math.min(fromId, toId);
+        Long secondId = Math.max(fromId, toId);
+
+        Account first = accountRepository.findByIdForUpdate(firstId);
+        Account second = accountRepository.findByIdForUpdate(secondId);
+
+        Account from = fromId.equals(firstId) ? first : second;
+        Account to = fromId.equals(firstId) ? second : first;
+
+        from.withdraw(amount);
+        to.deposit(amount);
+    }
+}
+
+```
+
+### 2. 낙관적 락 (Optimistic Lock)
+
+**언제 써?** 충돌이 별로 안 일어날 것 같을 때
+
+**어떻게?** 버전 번호로 충돌 감지
+
+**특징**:
+
+- 대기 시간 없음
+- 충돌 시 재시도 필요
+- 버전 관리 필요
+
+**장점**: 성능 좋음, 빠른 응답
+**단점**: 충돌 시 재처리 필요
+
+```java
+
+@Entity
+public class Account {
+    @Id
+    private Long id;
+
+    @Version
+    private Long version;// JPA가 자동 관리
+
+    private BigDecimal balance;
+
+    public void withdraw(BigDecimal amount) {
+        if (balance.compareTo(amount) < 0) {
+            throw new InsufficientBalanceException();
+        }
+        this.balance = balance.subtract(amount);
+    }
+}
+
+@Service
+@Transactional
+public class AccountService {
+    @Retryable(value = OptimisticLockingFailureException.class, maxAttempts = 3)
+    public void withdraw(Long accountId, BigDecimal amount) {
+        Account account = accountRepository.findById(accountId)
+            .orElseThrow(() -> new AccountNotFoundException());
+
+        account.withdraw(amount);
+        accountRepository.save(account);// 버전 체크 및 증가
+    }
+}
+
+```
+
+### 3. 증분 쿼리 (Atomic Update)
+
+**언제 써?** 단순한 카운터 증감할 때
+
+**어떻게?** DB의 원자적 연산 활용
+
+**특징**:
+
+- 락 없이 안전
+- 단순한 연산만 가능
+- 높은 성능
+
+**장점**: 성능 좋음, 락 불필요
+**단점**: 단순 연산만 가능
+
+```java
+
+@Repository
+public interface PostRepository extends JpaRepository<Post, Long> {
+    @Modifying
+    @Query("UPDATE Post p SET p.viewCount = p.viewCount + 1 WHERE p.id = :id")
+    int incrementViewCount(@Param("id") Long id);
+
+    @Modifying
+    @Query("UPDATE Post p SET p.likeCount = p.likeCount + :delta WHERE p.id = :id")
+    int updateLikeCount(@Param("id") Long id, @Param("delta") int delta);
+}
+
+@Service
+@Transactional
+public class PostService {
+    public void viewPost(Long postId) {
+        int updated = postRepository.incrementViewCount(postId);
+        if (updated == 0) {
+            throw new PostNotFoundException();
+        }
+    }
+}
+
+```
+
+### 4. 트랜잭션 격리 수준
+
+**언제 써?** 데이터 일관성 수준을 조절할 때
+
+**어떻게?** 격리 수준 설정
+
+**특징**:
+
+- 4단계 격리 수준
+- 성능과 일관성 트레이드오프
+- DB별 구현 차이
+
+**장점**: 세밀한 제어
+**단점**: 복잡성, 성능 영향
+
+```java
+
+@Service
+public class OrderService {
+
+// 기본 - 커밋된 데이터만 읽기
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Order getOrder(Long orderId) {
+        return orderRepository.findById(orderId).orElse(null);
+    }
+
+// 반복 읽기 보장
+    @Transactional(isolation = Isolation.REPEATABLE_READ)
+    public void processOrder(Long orderId) {
+        Order order1 = orderRepository.findById(orderId).orElse(null);
+// 다른 로직들...
+        Order order2 = orderRepository.findById(orderId).orElse(null);
+// order1과 order2는 같은 데이터 보장
+    }
+
+// 최고 수준 격리 (성능 저하)
+    @Transactional(isolation = Isolation.SERIALIZABLE)
+    public void criticalOperation(Long orderId) {
+// 완전한 격리 보장
+    }
+}
+
+```
