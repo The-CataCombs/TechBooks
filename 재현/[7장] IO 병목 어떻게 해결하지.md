@@ -128,18 +128,47 @@ java.lang.Thread.java
 > 읽으며 생긴 **의문**, **확인하고 싶은 개념**, **비판하고 싶은 주장** 등을 적습니다.
 
 - ❓ 질문 1:
-- 💭 더 알아보고 싶은 개념:
-- Blocking과 syncronized
-- Netty
+### 비동기 호출 시에 ThreadLocal 보장은 어떻게?
+- Thread값을 유지하기 떄문에 비동기 호출 시에 값이 유지되지 못함
+- Decorator를 사용해서 ThreadLocal에 있는 값을 옮겨서 사용할 수 있도록 한다.
+[링크](https://pompitzz.github.io/blog/Java/UseThreadLocalWhenAsyncCall.html#useridholder-정의)
+[링크](https://jaehoney.tistory.com/302)
+
+### Virtual Thread -  Syncronized의 한계 (Spring WebFlux vs VT)
+- VT의 성능을 끌어올리기 위해서는 Syncronized블록을 사용하면 안된다.
+- Syncronized는 java 캐리어 스레드에 고정시켜버리기 때문 -> Blocking IO에서 다른 VT가 캐리어스레드를 사용하도록 이를 반납하는 동작이 없어져버림
+  - OS레벨이나 JDK의 한계가 있음 -> 필요한 경우 ReetrantLock을 사용하기
+  - 자바는 모든 객체에 Monitor를 가지고 있고 스레드는 이 monitor를 사용해 lock 과 unlock이 가능함
+  - Syncronized는 C++ 수준에서 락을 사용하고 있음
+  - 반면 ReetrantLock의 경우에는 Java 수준에서 CAS연산을 수행하고 VT수준에서 모두 사용이 가능하다.
+- MySql JDBC Driver는 내부적으로 syncronized블록을 많이 사용하기 때문에 성능테스트에 적절하지 않다.
+[링크](https://jaeyeong951.medium.com/virtual-thread-synchronized-x-6b19aaa09af1)
+### Tomcat VS Netty
+스프링은 Connector를 통해 연결 설정, 클라이언트와의 통신을 활성화한다. (스레딩 및 리소스 할당까지)
+#### Tomcat  Blocking IO
+- 서블릿이 inputStream을 활용해 클라이언트에서 요청 데이터를 읽는다.
+- 데이터를 사용할 수 있을 떄 까지 스레드를 Blocking한다.
+#### Tomcat NIO COnnector
+- NIO의 핵심 개념은 Selector : 이벤트가 발생한 채널을 찾아 이벤트를 처리한다.
+- 하나의 스레드가 여러 채널을 처리하는게 가능함. Selector가 여러 채널에 대한 모니터링이 가능하다.
+- Poller와 Worker는 Selector인스턴스를 공유하기 때문에 Pollar에서 모니터링하고 이벤트가 발생하면 Worker에서 처리가 가능함
+
+#### Netty
+- Channel : Java NIO 의 일긱와 쓰기 같은 작업이 가능함
+- Future : Netty에서 사용되기 힘듦(작업 완료 여부 확인이나 작업이 완료될 때 까지 스레드가 차단됨)
+  - 자체 ChannelFuture를 통해서 여기에 콜백을 전달해 작업 완료 후 호출될 수 있도록 함
+1. 요청이 들어오면 NIO 이벤트 루프 그룹을 초기화하고 처리를 위한 채널 파이프라인을 설정한다.
+2. 채널 파이프라인은 각기 다른 기능을 수행하는 ChannelHandler의 연결 (ChannelHandler는 인바운드 아웃바운드 이벤트를 처리)
+3. ChannelHandler에서 작업을 처리하고 응답함
 
 ---
 
 ## 🎯 4. 정리 & 적용 아이디어
 
 - **내가 배운 것 한 줄 요약**:  
-  → `이 장을 통해 나는 ____을 이해했다.`
+  → 가상 스레드의 개념, Blocking, NonBlocking, 동기/비동기를 이해함
 - **개발에 어떻게 적용해볼까?**
-    - 실제 프로젝트나 업무에 적용해볼 수 있는 아이디어
+  - 비동기 처리시 ThreadLocal한 동작을 제어해서처리하는 방법을 학습
 
 ---
 
