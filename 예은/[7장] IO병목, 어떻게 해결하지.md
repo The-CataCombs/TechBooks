@@ -223,7 +223,8 @@ public void channelRead(ChannelHandlerContext ctx, Object msg) {
 
 ---
 
-## 💬 3. 이야기하고 싶은 질문 / 포인트
+## 💬 3. 이야기하고 싶은 질문 / 포인트 &&  🎯 4. 정리 & 적용 아이디어
+
 
 ```
 // 전통적인 방식
@@ -239,8 +240,102 @@ public void channelRead(ChannelHandlerContext ctx, Object msg) {
 } → GC가 다 관리함
 ```
 
-추가 예정
+### 🔍 **실무 적용 사례: 로그서치 최적화**
+
+현재 진행 중인 log-search 프로젝트의 실제 코드를 분석하니, 7장에서 배운 IO 병목 해결 기법들을 적용할 수 있는 **전형적인 블로킹 IO 사례**를 발견했다.
+
+#### **현재 구현의 블로킹 지점 분석**
+
+**executeCommand() 메서드의 블로킹 패턴:**
+```java
+// 실제 코드 (line 147-167)
+private String executeCommand(String command) {
+    // 1. 프로세스 생성 블로킹
+    ProcessBuilder processBuilder = new ProcessBuilder(cmd);
+    Process process = processBuilder.start();
+    
+    // 2. 프로세스 완료 대기 블로킹  
+    boolean completed = process.waitFor(config.getCommandTimeout(), TimeUnit.MILLISECONDS);
+    
+    // 3. 결과 읽기 블로킹
+    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        String line;
+        while ((line = reader.readLine()) != null) { // 각 라인마다 블로킹
+            result.append(line).append(System.lineSeparator());
+        }
+    }
+}
+```
+
+**getLogFiles() 메서드의 순차 처리:**
+```java
+// 실제 코드 (line 52-62)
+for (String path : serverPaths) {
+    try {
+        List<String> filesInPath = systemCommandService.getFileList(path); // 각 경로마다 블로킹
+        allFiles.addAll(filesInPath);
+    } catch (Exception e) {
+        // 하나 실패하면 다음까지 지연
+    }
+}
+```
+
+#### **7장 이론 기반 최적화 방안**
+
+**🚀 가상 스레드 적용**: 여러 서버 경로를 병렬로 처리
+```java
+// Before: 순차 블로킹 처리 (현재 코드)
+for (String path : serverPaths) {
+    List<String> filesInPath = systemCommandService.getFileList(path);
+    allFiles.addAll(filesInPath);
+}
+
+// After: 가상 스레드 병렬 처리
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    List<CompletableFuture<List<String>>> futures = serverPaths.stream()
+        .map(path -> CompletableFuture.supplyAsync(
+            () -> systemCommandService.getFileList(path), executor))
+        .collect(Collectors.toList());
+    
+    // 각 경로의 IO 대기 중 다른 경로 처리 가능
+    for (CompletableFuture<List<String>> future : futures) {
+        allFiles.addAll(future.get());
+    }
+}
+```
+
+**⚡ 논블로킹 IO 적용**: grep 프로세스 제거하고 Java NIO 직접 사용
+```java
+// Before: 프로세스 생성 + 파이프 통신 (현재 코드)
+String grepCommand = buildGrepCommand(filePath, keywords, searchType);
+Process process = processBuilder.start(); // 프로세스 생성 블로킹
+BufferedReader reader = new BufferedReader(...); // 순차 읽기 블로킹
+
+// After: NIO 비동기 파일 읽기
+AsynchronousFileChannel fileChannel = AsynchronousFileChannel.open(Paths.get(filePath));
+ByteBuffer buffer = ByteBuffer.allocate(8192);
+
+fileChannel.read(buffer, 0, buffer, new CompletionHandler<Integer, ByteBuffer>() {
+    @Override
+    public void completed(Integer result, ByteBuffer attachment) {
+        // 비동기로 패턴 매칭 수행
+        String content = new String(attachment.array(), 0, result);
+        // grep 없이 Java 정규식으로 필터링
+    }
+});
+```
+
+**📊 예상 성능 개선 효과:**
+- **현재(가정)**: 5개 서버 경로 × 평균 2초 = 10초 소요
+- **가상 스레드 적용**: IO 병렬 처리로 2-3초로 단축 (3-5배 개선)
+- **논블로킹 적용**: 프로세스 생성 오버헤드 제거로 추가 20-30% 개선
+
+사용자 대기시간을 현저히 줄일 수 있을 것이다.
+
+대용량 로그 파일을 읽는 기능이 이 서버의 주목적이다 보니까.. 
+IO 병목 개선이 핵심 개선사항으로 보임. 
+
+작업방향이랑 부작용 검토해보고 7월 첫째주까지 개선해보겠다. 
+
 
 ---
-
-## 🎯 4. 정리 & 적용 아이디어
