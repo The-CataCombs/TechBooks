@@ -339,3 +339,5 @@ IO 병목 개선이 핵심 개선사항으로 보임.
 
 
 ---
+자바 NIO관련 잼는 글
+https://jiwondev.tistory.com/262
