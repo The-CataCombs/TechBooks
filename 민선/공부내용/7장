@@ -1,0 +1,1262 @@
+서버는 inputstream과 outputstream으로 구성된다
+
+db에 select쿼리를 날릴때도 
+
+inputstream
+
+outputstream
+
+이있다
+
+데이터를 보내고 받을때 스레드는 데이터 전송이 완료될때까지 대기하게된다
+
+데이터 입출력이 완료될때까지 스레드는 아무 작업도 하지 않고 입출력이 끝나기를 기다린다
+
+= 입출력이 끝날때까지 스레드가 블로킹(작업이 완료될때까지 스레드가 대기하는 것) 된다
+
+입출력에 소요되는 시간은 코드 실행시간보다 훨씬 길다…
+
+네트워크 연동이 많은 프로그램은 전체 실행시간의 90% 이상을 입출력 대기에 사용하기도 한다…
+
+그렇다면 CPU 사용률을 높이려면? = 스레드가 입출력 대기시간에 놀지 않도록 하려면?
+
+1. 스레드를 더 많이 만든다. 요청당 스레드(thread per request)방식으로 구현한 서버
+    
+    문제
+    
+    1. 스레드가 늘어나면 메모리가 병목이 됨(1만명 사용자 ⇒ 스레드 1만개는 10G)
+    2. 스레드가 늘어나면 컨텍스트 스위칭 시간도 증가한다(CPU 사용률에 안좋겠죠?)
+    
+    <aside>
+    🧐
+    
+    그러면 톰캣처럼 요청당 스레드 방식인 서버는 왜 그러는건데?
+    
+    대다수의 서비스는 CPU와 메모리에 문제가 생길만큼의 트래픽이 발생하지 않음…
+    
+    수백만~수천만 고객이 쓰는 서비스가 아니라면 cpu와 메모리 자원 부족보단 다른 이유로 성능 문제가 발생함~
+    
+    </aside>
+    
+2. 자원 효율을 높여봄
+    1. 경량 스레드
+    2. 논블로킹/비동기 IO
+
+<aside>
+🧐
+
+성능을 높이겠다고 처음부터 비동기 IO로 개발하거나 가상 스레드를 적용하지는 말자
+
+실제로 IO 성능을 높여야 할만큼 트래픽이 증가하고 있거나 예상되는 트래픽이 높은 경우에만 적용 여부를 고민하자
+
+⇒ 왜? 비동기는 유지보수가 그렇게 힘들까?
+
+- 흐름 추적이 어려움 ⇒ 디버깅 지옥 stack trace가 끊기거나 전혀 다른 위치에서 예외 발생
+- 예외처리가 복잡함
+- thread context 못씀(thread local등)
+
+- Kotlin Coroutine: `suspend` 키워드로 비동기 작성하되 동기처럼 읽힘 → 유지보수성 높음
+</aside>
+
+1. 가상스레드로 자원 효율 높이기
+2. 논블로킹 IO로 성능 더 높이기
+
+가 이번장의 주요 주제
+
+## 가상 스레드로 자원 효율 높이기
+
+가상 스레드, 고루틴, 코루틴 ⇒ 입출력동안 스레드가 대기하지 않고 다른 일을 할 수 있음
+
+<aside>
+🧐
+
+경량 스레드: OS가 관리하는 스레드가 아니라 JVM같은 언어의 런타임이 관리하는 스레드
+
+언어 런타임이 OS 스레드로 실행할 경량 스레드를 스케쥴링함
+
+자바 경량 스레드
+
+- **Project Loom**의 핵심 기능
+- **협력형 스케줄링(cooperative scheduling)** 구조
+
+특징
+
+- 기존 Java 스레드는 OS 스레드와 1:1 매핑 → 무겁고 생성/전환 비용 큼
+- **가상 스레드**는 JVM 안에서 관리되는 **경량 스레드**로, 수십만 개도 만들 수 있음
+- `Thread.ofVirtual().start(() -> { ... })`로 생성
+
+| 구성 요소 | 설명 |
+| --- | --- |
+| **Virtual Thread (VT)** | 사용자가 만든 경량 스레드. 실제 작업 단위 |
+| **Carrier Thread (CT)** | OS 스레드. 실제 CPU 위에서 돌아가는 실행자 |
+| **ForkJoinPool (FJP)** | JVM이 가상 스레드를 실행시키기 위해 쓰는 기본 thread pool |
+
+### 스케줄링 방식: 협력형(Cooperative Scheduling)
+
+- 가상 스레드는 스스로 중단(suspend)함
+- JVM이 강제로 멈추지 않음 ⇒신기…
+- 중단 포인트
+    - `sleep`, `wait`, `join`, `I/O`, `BlockingQueue.take()` 등 **block이 예상되는 곳**
+- 그럼 JVM은 하는일이 뭐냐?
+    - 해당 VT를 Carrier Thread에서 떼어냄
+    - 다른 VT를 대신 실행함
+    - 이후 block이 풀리면 다시 **VT를 재개**
+
+```java
+
+Thread.ofVirtual().start(() -> {
+    var input = socket.read();  // 여기가 중단 포인트
+    process(input);
+});
+
+```
+
+> 이 socket.read() 동안 VT는 멈추고, Carrier Thread는 다른 VT 처리하러 감 → 스레드 자원 낭비 없음
+> 
+
+### 스케줄링 방식 2가지
+
+- **협력형 (Cooperative)**
+    - 실행 중인 작업이 **스스로 양보**해야만 다음 작업으로 전환됨
+    - Kotlin Coroutine, JVM Virtual Thread, 일부 유저 모드 스레드
+- **선점형 (Preemptive)**
+    - 런타임 or OS가 **강제로 중단**시키고 다른 작업으로 전환함
+    - Java OS Thread, 대부분의 OS (Linux, Windows), Go runtime
+</aside>
+
+풀에 어떻게 넣어두고 
+
+JVM이 어떻게 여러 가상 스레드를 번갈아서 실행하시는건데요?
+
+<aside>
+🧐
+
+### **JVM 내부**
+
+중단할때는~
+
+1. **중단 감지**: `socket.read()` 같은 블로킹 연산 감지
+2. **실행 상태 저장**: 현재 VT의 스택, 로컬 변수, 실행 포인터를 `Continuation`에 저장
+3. **큐 이동**: VT를 Ready Queue → **Blocked Queue**로 이동
+4. **Carrier Thread 해제**: 현재 Carrier Thread에서 VT 제거
+5. **다른 VT 실행**: 같은 Carrier Thread가 Ready Queue의 다른 VT 실행
+
+재개할때는~
+
+1. VT-A를 Blocked Queue → Ready Queue로 이동
+2. 사용 가능한 Carrier Thread 찾기
+3. Continuation에서 저장된 상태 복원
+4. 중단되었던 지점부터 실행 재개
+
+### 스케쥴링 큐
+
+Ready Queue] ← 실행 대기 중인 VT들
+↓
+[Carrier Thread Pool]
+CT1: VT-A 실행 중
+CT2: VT-B 실행 중
+
+CT3: 유휴 상태
+↓
+[Blocked Queue] ← I/O 대기 중인 VT들
+
+Continuation ⇒ java랑 kotlin 약간의 차이 존재
+
+</aside>
+
+플랫폼스레드(OS스레드) ↔ 경량스레드(가상스레드)
+
+가상스레드의이득~
+
+### 메모리 이득!
+
+1만개 스레드 생성~ 얍~
+
+OS스레드) 스레드 기본 스택이 1MB일때 9.8GB의 메모리 사용
+
+가상스레드) 스레드 1개가 2KB이면 가상스레드가 사용하는 힙 메모리는 20MB, 스케쥴링을 위한 플랫폼 스레드가 8개인 경우 추가로 8MB의 스택 메모리를 사용
+
+= 28MB
+
+미쳤는데?! 가상스레드 당장도입해
+
+<aside>
+🧐
+
+가상스레드는 왜 스레드당 스택이 안 잡혀있는 거 같지?!
+
+→ 스택을 힙에 저장하기 때문…
+
+→ 뭔데 그게 어떻게 하는건데
+
+- 실행 중엔 스택을 쓰지만, 중단(suspend)되면 **현재 호출 상태(call stack)를 객체 형태로 힙에 serialize**해서 보관함
+    
+    `Continuation`, `StackChunk` 등이 힙에 스택 프레임을 보존
+    
+
+→ 그래서 스레드 하나당 고정된 스택 메모리가 필요 없음
+
+→ 힙에 잠깐씩 2KB~4KB 정도만 할당해서 필요한 순간만 스택처럼 써!
+
+이게 대박 신기하네요~ 이걸 더 파봐야겠네~
+
+Project Loom이 진짜 대박인 점!
+
+## 일반 스레드 = 스택을 OS가 고정 할당
+
+- OS 스레드는 생성 시 **스택 메모리를 고정 크기(보통 1MB)로 미리 확보**함
+    - 이유: 시스템 콜, 재귀 함수, 지역 변수 등을 위한 **콜 스택 공간이 필요**
+- 그래서 **1,000개 스레드만 만들어도 1GB 이상 메모리 날아감**
+
+## 가상 스레드 스케줄링과 메모리의 실제 분리
+
+```
+
+[가상 스레드1] ─┐      (스택 없음, 힙에 상태 저장)
+[가상 스레드2] ─┤───> [Carrier Thread A] ─ OS 스레드 (8개만 존재)
+[가상 스레드3] ─┘
+
+각 VT는 필요할 때만 carrier thread 위에서 돌아감 → 이 때만 "스택 공간"을 잠깐 씀
+```
+
+- 중단되면 carrier에서 내려오고, 호출 상태는 heap에 저장됨
+- 재개되면 carrier에 다시 올라가면서 스택 복원
+
+## 그럼 단점은?
+
+- 힙을 더 많이 쓰긴 함 (GC 부담)
+- 스택 프레임을 힙에 저장/복원하는 오버헤드 있음
+- 네이티브 호출, synchronized, JNI 등과 같이 "carrier 스레드 점유"가 필요한 경우 주의 필요
+</aside>
+
+### 스레드 생성시간 이득!
+
+```java
+Thread[] threads = new Thread[100_000]; // 10만 개
+
+long start = System.currentTimeMillis();
+
+for (int i = 0; i < threads.length; i++) {
+    // 가상 스레드는 Thread.ofVirtual()로 생성
+    Thread thread = Thread.ofPlatform().start(() -> {
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    });
+    threads[i] = thread;
+}
+
+long end = System.currentTimeMillis();
+
+```
+
+10만개의 스레드를 생성해봄~
+
+플랫폼 스레드: 21,467ms
+
+가상스레드: 196ms
+
+플랫폼 스레드에 비해 훨씬 적은 비용(자원, 시간)이 들어서 훨씬 많은 가상 스레드를 생성할 수 있다
+
+⇒ 톰캣처럼 요청별 스레드(thread per request)를 생성하는 서버에서 가상 스레드를 사용하면 더 적은 메모리로 더 많은 요청을 처리할 수 있다는 것을 뜻함~~
+
+### 캐리어 스레드
+
+가상스레드를 실행하는 플랫폼 스레드~
+
+CPU가 여러 스레드를 실행하는 것처럼 한개의 캐리어 스레드도 여러 가상 스레드를 실행
+
+mount: 특정 가상 스레드가 특정 캐리어 스레드에 연결되는 것
+
+unmount: 가상 스레드가 실행을 멈춤(캐리어 스레드에서)
+
+### 네트워크 IO와 가상 스레드
+
+가상스레드를 실행하다가 블로킹되면 → 플랫폼 스레드와 언마운트되고 실행이 멈춘다 → 플랫폼 스레드가 다른 가상 스레드를 마운트 후 실행
+
+### 블로킹 연산과 synchronized(주의할점!)
+
+블로킹 연산에는 IO기능, ReentrantLock, Thread.sleep() 등이 있음
+
+→ 블로킹 연산을 사용해서 가상 스레드가 블로킹되면 플랫폼 스레드는 대기중인 다른 가상 스레드를 실행함
+
+!!! 자바 23 이하 버전에서 synchronized로 인해 블로킹되면 가상 스레드는 플랫폼 스레드로부터 언마운트되지 않음 == 플랫폼 스레드도 블로킹됨 !!! 
+
+→ 뭐야 내 비동기 돌려줘요
+
+가상 스레드가 플랫폼 스레드까지 블로킹할때 = 가상 스레드가 플랫폼 스레드에 고정됐다(pinned)
+
+자바 21 기준으로 synchronized 외에도 JNI호출(이게뭔데?) 등 
+
+→ 가상 스레드가 플랫폼 스레드에 고정되는 경우가 있음… 
+
+→ 당연히 CPU 효율을 높일 수가 없다~
+
+### 가상 스레드와 성능
+
+코드는 두가지다
+
+- IO 작업(IO bound task)
+- CPU 중심 작업(CPU bound task)
+
+네트워크 프로그래밍 등 입출력이 주를 이루는 작업 : IO중심 작업
+
+정렬처럼 계산이 주를 이룸 : CPU 중심 작업
+
+- IO 작업  ⇒ 가상 스레드 도입하면 성능개선O
+- CPU 중심 작업 ⇒ 가상스레드 도입해봤자 성능개선X 오히려 악화될수도
+
+IO중심 작업이라고 무조건 가상스레드 도입해서 성능개선이 되는것도 아님
+
+스케쥴링에 사용되는 플랫폼 스레드 개수 < 가상 스레드 개수 여야 효과가 기대됨
+
+<aside>
+🧐
+
+### 가상스레드를 의미있게 쓰려면 주의사항
+
+장비 CPU 코어 16개
+
+서버 평소 TPS 500
+
+1개 요청을 처리하는데 소요되는 시간 20밀리초
+
+모든 요청은 IO 중심 작업이다
+
+### 단순계산
+
+1개스레드 1초동안 50개의 요청 처리 ⇒ 1초에 500개 요청 처리하려면 10개의 스레드 필요
+
+### 가상스레드 도입
+
+플랫폼 스레드 16개 생김(CPU 코어가 16개)
+
+동시요청은 10개 → 생기는 가상스레드는 10개
+
+동시에 10개의 가상스레드 
+
+→ IO대기상태가 대부분
+
+→ IO대기상태에서 플랫폼 스레드는 실행가능한 다른 가상 스레드 찾음
+
+→ 대부분의 가상 스레드가 IO 대기중, 실행가능한 스레드 없음
+
+→ 플랫폼 스레드 16개 중 실제로 사용되는 스레드는 10개도 되지 않음
+
+⇒ 결과적으로 가상스레드의 이점이 없어진다… 컨텍스트 스위칭 비용만 증가할듯…
+
+⇒ 가상스레드 이점을 얻으려면 CPU 코어 수를 줄이거나(플랫폼스레드가 줄어야) 트래픽이 더 많아져야 함(가상스레드가 늘어야)
+
+⇒ 플랫폼스레드를 줄이고 가상스레드를 늘려야 가상스레드의 이점이 있음
+
+</aside>
+
+<aside>
+🧐
+
+여기서 드는 생각~
+
+가상스레드/플랫폼스레드 의 비율이 어느정도면 제일 좋을까?
+
+이게 커져야 가상스레드의 이점이 있지만 너무 많이 늘어나도 멀티스레드의 의미가 없을것같은데 거의 단일스레드 컨텍스트 스위칭이랑 똑같을거 같은데
+
+### **정답은 없지만, 좋은 기준은 있다**
+
+| 지표 | 권장 기준 |
+| --- | --- |
+| 가상 스레드 수 / 플랫폼 스레드 수 | **1000:1 이상** 되어야 실익 있음 (최소 수백:1) |
+| 가상 스레드 평균 실행 시간 | 짧고 빠를수록 좋음 |
+| IO 대기 비율 | 높을수록 효과 큼 |
+| CPU 사용률 | 낮을수록 유리함 (아니면 CPU bound는 별도 thread pool로 분리해야) |
+
+> 즉, 스레드를 오래 점유하지 않으면서 수백~수천 개 요청을 동시에 처리해야 하는 서비스일수록 가상 스레드 효율이 잘 나와.
+> 
+
+## 💡 참고 전략
+
+- **Carrier thread 수는 보통 CPU core 수 (ForkJoinPool 기본값)**
+    
+    → `Executors.newVirtualThreadPerTaskExecutor()` 내부적으로 그렇게 설정됨 ⇒ 다른 스터디에서도 스레드풀 크기를 이렇게 정했었지~
+    
+- **`ThreadFactory` 직접 설정해서 carrier thread 제한 가능**
+- **CPU-bound 작업은 별도의 Executor로 분리해서 컨플릭트 줄이기**
+- `ScopedValue` 같은 구조적 동시성 API로 context 관리도 보완 가능
+</aside>
+
+<aside>
+🧐
+
+### 가상 스레드의 함정⇒ Carrier Thread 고갈
+
+락 파트에서 했던 쓰기 기아처럼 스레드도 기아현상이…
+
+```java
+// 이렇게 하면 큰일남!
+Thread.startVirtualThread(() -> {
+// CPU 집약적 작업을 가상 스레드에서 실행
+    for (int i = 0; i < 1_000_000_000; i++) {
+        heavyComputation();// CPU를 계속 점유!
+    }
+});
+
+```
+
+가상 스레드가 **carrier thread를 독점**해버림!
+
+### Carrier Thread Pool의 한계
+
+```
+
+ForkJoinPool (기본 8개 스레드) ← 실제 OS 스레드
+    ↓
+Virtual Thread 1 → CPU 작업 (carrier thread 점유) 😈
+Virtual Thread 2 → I/O 대기 (carrier thread 해제) ✅
+Virtual Thread 3 → I/O 대기 (carrier thread 해제) ✅
+...
+Virtual Thread 1000 → 대기 중... 😭 (carrier thread 없음)
+
+```
+
+### 정상적인 I/O 작업
+
+```java
+
+Thread.startVirtualThread(() -> {
+    database.query();// carrier thread 해제 (park)// 쿼리 완료되면 다른 carrier thread에서 재개 (unpark)
+    processResult();
+});
+
+```
+
+### 문제가 되는 CPU 작업
+
+```java
+
+Thread.startVirtualThread(() -> {
+// 이 작업 동안 carrier thread가 계속 점유됨
+    while (condition) {
+        calculation();// park/unpark 없음!
+    }
+});
+
+```
+
+## 해결 ⇒ Executor 분리(이러면 걍 코틀린이나 노드방식 아님..?)
+
+### 올바른 패턴
+
+```java
+
+// I/O용: 가상 스레드
+Executor virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+// CPU용: 일반 스레드 풀
+Executor cpuExecutor = Executors.newFixedThreadPool(
+    Runtime.getRuntime().availableProcessors()
+);
+
+// 사용법
+public CompletableFuture<Result> processData() {
+    return CompletableFuture
+        .supplyAsync(() -> {
+// I/O 작업은 가상 스레드에서
+            return fetchDataFromDB();
+        }, virtualThreadExecutor)
+        .thenComposeAsync(data -> {
+// CPU 작업은 별도 스레드 풀에서
+            return CompletableFuture.supplyAsync(() -> {
+                return heavyComputation(data);
+            }, cpuExecutor);
+        })
+        .thenComposeAsync(result -> {
+// 다시 I/O 작업은 가상 스레드에서
+            return CompletableFuture.supplyAsync(() -> {
+                return saveToCache(result);
+            }, virtualThreadExecutor);
+        });
+}
+
+```
+
+## Spring에서 적용
+
+### @Async 어노테이션 분리
+
+```java
+
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+
+// I/O용 가상 스레드 executor
+    @Bean("ioExecutor")
+    public Executor ioExecutor() {
+        return Executors.newVirtualThreadPerTaskExecutor();
+    }
+
+// CPU용 일반 스레드 풀
+    @Bean("cpuExecutor")
+    public Executor cpuExecutor() {
+        return Executors.newFixedThreadPool(
+            Runtime.getRuntime().availableProcessors()
+        );
+    }
+}
+
+@Service
+public class DataService {
+
+    @Async("ioExecutor")// I/O 작업
+    public CompletableFuture<User> fetchUser(String id) {
+        return CompletableFuture.completedFuture(
+            userRepository.findById(id)// DB 조회
+        );
+    }
+
+    @Async("cpuExecutor")// CPU 작업
+    public CompletableFuture<Report> generateReport(List<Data> data) {
+        return CompletableFuture.completedFuture(
+            complexAnalysis(data)// 무거운 계산
+        );
+    }
+}
+
+```
+
+## 성능 비교
+
+### 잘못된 방식 (모든 걸 가상 스레드에서)
+
+```java
+// 10개의 CPU 작업을 가상 스레드에서 실행
+for (int i = 0; i < 10; i++) {
+    Thread.startVirtualThread(() -> {
+        heavyComputation();// 각각 5초 소요
+    });
+}
+// 결과: carrier thread 8개 모두 점유 → 나머지 2개는 대기// 총 시간: 10초 (5초 + 5초)
+
+```
+
+### 올바른 방식 (CPU 작업은 별도 풀에서)
+
+```java
+// CPU 작업은 CPU 전용 스레드 풀에서
+ExecutorService cpuPool = Executors.newFixedThreadPool(8);
+for (int i = 0; i < 10; i++) {
+    cpuPool.submit(() -> {
+        heavyComputation();// 각각 5초 소요
+    });
+}
+// 결과: 8개 모두 병렬 실행 → 나머지 2개만 대기// 총 시간: 7초 정도 (8개 병렬 + 2개 순차)
+
+```
+
+### 작업 분류 기준
+
+빨리 park로 끊어내고 남는시간에 다른것도 실행해야 의미있는데 
+
+안 그러면 다른거 다 대기타서… park 많이 안 들어가는건 비동기 효율이 떨어지게 됨
+
+이 작업이 park를 호출하냐 ⇒ 가상스레드 YES
+
+가상 스레드에 적합한 작업들
+- database.query()
+- httpClient.get()
+- file.read()
+- Thread.sleep()
+- 네트워크 I/O
+
+이 작업이 park를 호출하지 않는다 ⇒ 가상스레드 NO
+
+별도 스레드 풀에 넣어야 할 작업들
+- 이미지/비디오 처리
+- 암호화/복호화
+- 정렬, 검색 알고리즘
+- 수학적 계산
+- 파일 압축/해제
+
+</aside>
+
+### 가상스레드와 스레드 풀
+
+요청별 스레드 방식을 사용하는 서버(톰캣 등)는 스레드 풀을 사용~
+
+미리 스레드를 생성해서 요청이 들어왔을 때 스레드 생성 부하를 줄이기 위함임
+
+스레드 풀 크기에 최대치를 설정해서 요청이 급격히 늘어나도 스레드가 무한정 생성되는 것을 막음
+
+CPU와 메모리같은 자원을 일정 수준으로 제한해서 서버 자원이 포화되는것을 방지~
+
+가상 스레드는 플랫폼 스레드보다 생성 비용이 적기떄문에 스레드 풀을 미리 구성할 필요가 없다!!!
+
+필요한 시점에 가상 스레드를 생성하고 필요없으면 제거하면 됨
+
+⇒ 오… 완전 혁신인데?!>!>!
+
+### 가상스레드의 장점!!! 중요!!!
+
+기존 코드를 크게 수정할 필요가 없음~ ⇒ 전에 알아본 프로젝트 룸, 자바 가상스레드의 장점~ 
+
+레거시랑 호환이 잘됨~
+
+스프링프레임워크 및 MySQL JDBC 드라이버 같은 많이 사용하는 프레임워크와 라이브러리도 이미 가상 스레드를 지원하고 있음~ 
+
+조금만 신경쓰면 기존 코드를 그대로 유지하면서 가상스레드를 이용해 서버의 성능을 높일 수 있음~ 
+
+### 가상스레드가 없었을때는
+
+성능개선할때 논블로킹으로 싹 다 재구현해야 했지만
+
+지금은 가상스레드만 도입하면됨..레거시의 혁신그자체
+
+## 논블로킹 IO로 성능 더 높이기
+
+경량스레드 자체도 메모리를 사용하고 스케쥴링이 필요해서
+
+경량스레드가 많아질수록 더 많은 메모리를 사용하고 스케쥴링에 더 많은 시간을 사용함
+
+사용자가 폭발적으로 증가한다면 어느 순간 경량스레드도 한계가 옴
+
+⇒ 경량스레드로도 안 된다면 논블로킹 IO를 도입해야함
+
+오래전부터 네트워크 서버의 성능을 높이기 위해 사용해온 방식이다(Netty, Node.js, Nginx)
+
+비동기 API를 곁들이면 덜 복잡한 코드로 높은 성능을 낼 수 있음
+
+### 논블로킹 IO
+
+입출력이 끝날때까지 스레드가 대기하지 않는다
+
+<aside>
+🧐
+
+동기 비동기 블로킹 논블로킹, 저번엔 가게로 이해했다면
+
+이번엔 호출하는 입장 호출당한 입장으로 구분해서 다시 정리해봄
+
+동기 비동기 ⇒ 손님 입장(호출하는 입장)
+
+블로킹 논블로킹 ⇒ 사장 입장(호출당한 입장)
+
+동기: 손님이 카운터 앞에서 기다림
+
+비동기: 손님이 카운터 앞에서 기다리지 않고 진동벨 들고 가서 앉아있음
+
+블로킹: 사장이 음식 나오면 카운터 앞에서 손님에게 줄때까지 기다림
+
+논블로킹: 사장이 음식 나오면 카운터에 올려두고 진동벨 누르고 다른일함
+
+이해가… 잘 된다..! 기억하는데 성공했다…!
+
+- Spring MVC: **동기 + 블로킹**
+- WebClient + Coroutine: **비동기 + 논블로킹**
+- Netty: **논블로킹 기반**
+- Kotlin Coroutine 기본 흐름: **비동기 + 논블로킹** (suspend + Dispatchers)
+</aside>
+
+```java
+//channel: SocketChannel, buffer: ByteBuffer
+int byteReads = channel.read(buffer);//데이터를 읽을때까지 대기하지 않는다
+//읽은 데이터가 없어도 다음 코드를 실행한다~
+```
+
+데이터를 조회했는지 여부에 상관없이 대기하지 않고 바로 다음 코드를 실행해서 
+
+블로킹 IO처럼 데이터를 조회했다는 가정 하에 코드를 작성할수가 없음
+
+→ 루프 안에서 조회를 반복적으로 호출 
+
+→ 데이터를 읽었을때만 처리하는 방식으로 구현(이러면 논블로킹+동기 아니야? 호출자가 가서 피호출자한테 결과 나왔냐고 계속 물어보는거잖아)
+
+→ 맞음 이것은 논블로킹+동기
+
+"논블로킹 I/O + 동기 Polling 호출”
+
+### 이걸 왜 굳이 이렇게 쓰냐?
+
+- 이 패턴은 **select(), poll(), epoll** 같은 low-level 네트워크 IO에서 자주 나옴
+- 자바의 NIO 기반 `SocketChannel`, `Selector`, `SelectionKey` 같은 것들에서 **이벤트 감지 전에 polling**하거나 **non-blocking read/write**를 여러 번 호출함
+- 효율적이진 않지만 구조가 단순해서 종종 사용됨
+
+### 어떻게 개선할 수 있을까?
+
+### 1. **Selector 이용 (이벤트 기반 논블로킹)**
+
+```java
+selector.select(); // 블로킹이지만 I/O 준비될 때까지 대기
+Set<SelectionKey> keys = selector.selectedKeys();
+// 키가 읽기 가능 상태면 read 수행
+```
+
+→ 더 이상 직접 계속 묻지 않고, **I/O 준비 완료 이벤트 발생 시 처리 가능**
+
+### 2. **비동기 API로 완전히 넘기기**
+
+- Java: `AsynchronousSocketChannel`
+- Kotlin: `suspendCoroutine`, `withContext(Dispatchers.IO)`
+- Node.js / Python asyncio 등도 여기에 해당
+
+```java
+//CPU 낭비가 심한 방식 => 논블로킹+동기면 CPU 낭비가 심하지 당연히...
+while(true){
+	int byteReads = channel.read(buffer);
+	if (byteReads > 0){
+		handleData(channel, buffer);
+	}
+}
+```
+
+읽은 데이터가 없어도 while 루프가 무한히 실행된다고~~
+
+실제로 논블로킹 IO를 사용할때는 데이터 읽기를 바로 시도하지 않고
+
+어떤 연산을 수행할 수 있는지 확인하고 해당 연산을 실행하는 방식으로 구현함
+
+실행 흐름은 대략 다음과 같음
+
+1. 실행 가능한 IO 연산 목록을 구할때까지 대기
+2. 구한 IO 연산 목록을 차례대로 순회
+    1. 각 IO연산을 처리
+3. 과정을 반복
+
+Java NIO Selector~
+
+```java
+Selector selector = Selector.open();
+
+ServerSocketChannel serverSocket = ServerSocketChannel.open();
+serverSocket.bind(new InetSocketAddress(7031));
+serverSocket.configureBlocking(false); // 서버 소켓 비동기 설정
+
+serverSocket.register(selector, SelectionKey.OP_ACCEPT); // 연결 연산 등록
+
+while (true) {
+    selector.select(); // 실행 가능한 IO 연산이 있을 때까지 대기
+    Set<SelectionKey> selectedKeys = selector.selectedKeys();
+    Iterator<SelectionKey> iterator = selectedKeys.iterator();
+
+    while (iterator.hasNext()) { // IO 연산 순회
+        SelectionKey key = iterator.next();
+        iterator.remove();
+
+        if (key.isAcceptable()) { // 클라이언트 연결 처리 가능하면
+            SocketChannel client = serverSocket.accept(); // 클라이언트 연결 처리
+            client.configureBlocking(false); // 소켓 비동기 설정
+            client.register(selector, SelectionKey.OP_READ); // 읽기 연산 등록
+
+        } else if (key.isReadable()) { // 읽기 연산 가능하면
+            SocketChannel channel = (SocketChannel) key.channel(); // 채널 구함
+            int readBytes = channel.read(inBuffer); // 채널에 읽기 연산 실행
+
+            if (readBytes == -1) {
+                channel.close();
+            } else {
+                inBuffer.flip();               // 읽은 데이터를 출력 버퍼에 복사
+                outBuffer.put(inBuffer);
+                inBuffer.clear();
+
+                outBuffer.flip();
+                channel.write(outBuffer);      // 채널에 쓰기 연산 실행
+                outBuffer.clear();
+            }
+        }
+    }
+}
+
+```
+
+이 코드의 핵심은 Selector
+
+Selector#select()는 IO처리가 가능한 연산이 존재할때까지 대기(동기+블로킹)
+
+이 메서드가 리턴된다면 수행할 수 있는 연산이 존재하는 것
+
+실행 가능한 연산 목록은 Selector#selectedKey()로 조회함
+
+이렇게 구해온 키로 어떤 연산이 가능한지 확인하고 해당 연산을 수행한다~
+
+논블로킹 IO ⇒ 클라이언트 수에 상관없이 소수의 스레드 사용 ⇒ 같은 메모리로 더 많은 클라이언트 연결을 처리
+
+블로킹 IO ⇒ 커넥션별로 스레드 할당
+
+### IO 멀티플렉싱
+
+단일 이벤트 루프에서 여러 IO 작업을 처리하는 개념
+
+논블로킹 IO와 Selector를 이용한 입출력 처리⇒ IO 멀티플렉싱
+
+리눅스: epoll
+
+윈도우: IOCP
+
+맥은: **kqueue**
+
+<aside>
+🧐
+
+epoll vs IOCP vs kqueue
+
+Linux epoll
+
+- Reactor 패턴 : 데이터가 준비됐다고 알려줌
+- 사용자 공간에서 직접 read/write 수행
+
+Windows IOCP
+
+- Proactor 패턴: 커널이 I/O를 대신 수행
+- **Completion-based**: I/O 작업이 완료되면 알려줌
+- **진정한 비동기**: 논블로킹 + 완료 통지
+
+macOS/BSD kqueue
+
+- Reactor 패턴
+- epoll과 유사하지만 더 일반화됨
+
+**epoll/kqueue (Reactor)**
+
+```
+1. "소켓에 데이터가 준비됨!" → 알림
+2. 사용자: read() 호출하여 직접 읽기
+3. 데이터 처리
+```
+
+**IOCP (Proactor)**
+
+```
+1. ReadFile() 호출 → 커널이 백그라운드에서 읽기 시작
+2. 사용자: 다른 작업 수행
+3. "읽기 완료됨! 버퍼에 데이터 준비됨!" → 알림
+4. 데이터 처리 (이미 준비된 상태)
+```
+
+</aside>
+
+IO 멀티플렉싱을 사용하면 더 적은 자원(메모리와 CPU)로 더 많은 클라이언트를 처리할 수 있음
+
+대규모 트래픽을 처리해야하는 서버를 구현할때 IO 멀티플렉싱을 사용한다
+
+<aside>
+🧐
+
+근데 아까 Selector는 동기 논블로킹이라며
+
+그러면 비동기 논블로킹이 더 효율적인데 왜그러는건데
+
+그럼 IO 멀티플렉싱은 그럼 동기 비동기를 모두 포함한 그냥 논블로킹인 개념인건가?
+
+호출당한 입장(서버)만 효율적이면 되는건가? IO에서는 클라이언트 부하는 알바가 아닌건가?
+
+Selector 기반 IO는
+
+**"논블로킹 + 동기"**
+
+IOCP나 Linux AIO는
+
+**"논블로킹 + 비동기"**
+
+### 왜 동기 논블로킹(Selector)도 많이 쓰는가?
+
+### **구현 난이도 + 안정성 + OS 제약**
+
+- Selector (epoll, kqueue)는 간단하게 `select()` 하나로도 수천 개 소켓을 제어 가능
+- 비동기 IO(AIO, IOCP)는 콜백 기반이라 **설계가 복잡**하고 **오류 처리 어려움**
+- JVM에서 `AsynchronousSocketChannel` 등 비동기 IO는 있긴 하지만 **API가 어렵고 덜 쓰임**
+- **Selector 기반은 이벤트 루프 방식으로 코루틴 / Reactor / Netty에서도 더 잘 맞음**
+
+### IO 멀티플렉싱은 논블로킹 전체 개념이 맞음
+
+- **IO 멀티플렉싱은 여러 소켓의 이벤트를 감시해서 처리하는 방식**
+- **동기/비동기와는 별개**
+
+| 유형 | 예시 |
+| --- | --- |
+| **동기 + 논블로킹** | Selector, epoll (Java NIO, Netty 등) |
+| **비동기 + 논블로킹** | IOCP (Windows), Linux AIO , Java `AsynchronousSocketChannel` |
+
+## 호출한 쪽(클라이언트)은 신경 안 써도 되는가?
+
+- **서버가 병목이기 때문에**, 서버 구조가 중요함
+- **서버 간 통신(M2M, API)** 같은 경우는 클라이언트도 비동기 논블로킹 구조가 유리할 수 있음
+</aside>
+
+논블로킹 IO를 1개의 스레드로 구현하면 동시성이 떨어짐
+
+1개 채널에 대한 읽기 처리가 끝나야 다음 채널에 대한 읽기 처리를 실행
+
+논블로킹 IO에서 동시성을 높이기 위해
+
+- 채널들을 N개 그룹으로 나눔, 각 그룹마다 스레드 생성
+- 보통 CPU 개수만큼 그룹을 나누고 각 그룹마다 입출력을 처리할 스레드를 할당
+
+### 리액터 패턴
+
+동시에 들어오는 여러 이벤트를 처리하기 위한 이벤트 처리 방법
+
+- 리액터 : 이벤트가 발생할 때까지 대기하다가 이벤트가 발생하면 알맞은 핸들러에 이벤트를 전달
+    - 이벤트 루프라고도 함: 이벤트를 대기하고 핸들러에 전달하는 과정을 반복
+- 핸들러 : 이벤트를 받은 핸들러는 필요한 로직을 수행
+
+```java
+while(isRunning){
+	List<Event> events = getEvents(); // 이벤트가 발생할 때까지 대기
+	for(Event event){
+		Handler handler = getHandler(event); // 이벤트를 처리할 핸들러 구함
+		handler.handle(event); // 이벤트를 처리함
+	}
+}
+```
+
+이벤트 루프를 돌고있다
+
+논블로킹 IO 예제코드를 보면
+
+SelectionKey = 이벤트
+
+Netty, Nginx, Node.js등의 프레임워크나 서버는 리액터 패턴을 사용하고 있다
+
+이벤트 루프는 단일 스레드임
+
+⇒
+
+### 이벤트 루프 단일 스레드의 한계를 극복해보자!
+
+리액터 패턴에서 이벤트 루프는 단일 스레드로 실행됨
+
+멀티코어를 가진 서버에서 단일 스레드만 사용한다면 처리량을 최대로 낼 수 없다
+
+핸들러에서 CPU 연산이나 블로킹을 유발하는 연산을 수행하면 그 시간만큼 전체 이벤트 처리 시간이 지연된다
+
+한계를 보완하기 위해 핸들러, 블로킹 연산을 별도 스레드 풀에서 실행
+
+Netty는 여러개의 이벤트 루프를 생성해 멀티코어를 활용함!
+
+Node.js는 이벤트 루프 외에 별도의 스레드 풀을 사용해서 CPU 중심 작업이나 블로킹 연산을 동시에 사용
+
+<aside>
+🧐
+
+## 단일 스레드의 한계점
+
+### 1. 멀티코어 활용 부족
+
+서버는 대부분 멀티코어 CPU를 사용하지만
+
+단일 스레드 이벤트 루프는 **하나의 코어만 사용**
+
+나머지 코어들은 유휴 상태로 남아있어 시스템 자원을 효율적으로 활용하지 못함
+
+### 2. 블로킹 연산으로 인한 전체 지연
+
+핸들러에서 다음과 같은 작업을 수행하면 전체 이벤트 처리가 지연됨
+
+- **CPU bound task**
+- **블로킹 I/O** (파일 읽기/쓰기, 동기 데이터베이스 호출 등)
+- **긴 실행 시간을 요구하는 작업**
+
+한 핸들러가 오래 실행되면, 그 시간 동안 다른 모든 이벤트들이 대기하게 되어 전체 시스템의 응답성이 떨어짐
+
+## 한계 극복 방법
+
+### 1. 스레드 풀 활용
+
+```
+이벤트 루프 (메인 스레드)
+    ↓
+무거운 작업 감지
+    ↓
+스레드 풀로 작업 위임
+    ↓
+결과를 이벤트 루프로 반환
+```
+
+무거운 작업이나 블로킹 연산을 **별도의 스레드 풀**에서 실행하고
+
+완료되면 결과를 이벤트 루프로 다시 전달
+
+### 2. Netty의 접근법: 다중 이벤트 루프
+
+Netty는 **여러 개의 이벤트 루프**를 생성하여 멀티코어를 활용
+
+- **Boss EventLoopGroup**: 새로운 연결을 받아들이는 역할(게이트웨이 느낌)
+- **Worker EventLoopGroup**: 실제 I/O 처리를 담당하는 여러 개의 이벤트 루프 ⇒ 같은 연결의 모든 이벤트가 동일한 EventLoop(스레드)에서 처리되므로 **동기화 문제가 발생하지 않음**
+
+각 이벤트 루프가 서로 다른 CPU 코어에서 독립적으로 실행되어 병렬 처리가 가능
+
+### 3. Node.js의 접근법: 하이브리드 모델
+
+Node.js는 두 가지 방식을 조합
+
+- **메인 이벤트 루프**: 비동기 I/O 처리
+- **스레드 풀 (libuv)**: CPU 집약적 작업과 일부 블로킹 연산 처리
+
+예를 들어, 파일 시스템 작업이나 DNS 조회 같은 작업은 자동으로 스레드 풀에서 실행
+
+**Netty**: 스레드 레벨에서 여러 이벤트 루프가 **메모리를 공유**하며 동작
+**Node.js**: 프로세스 레벨에서 여러 인스턴스가 **독립적으로** 동작
+
+따라서 Node.js에서는 Netty처럼 내장된 연결 분배 메커니즘이 없고, 멀티코어를 활용하려면 클러스터링이나 로드 밸런서를 별도로 구성해야 함
+
+### Netty의 장점
+
+- **진정한 멀티코어 활용** (스레드 레벨)
+- **높은 처리량** (동시 연결 수 많을 때)
+- **메모리 효율성** (스레드간 메모리 공유)
+- **세밀한 제어** 가능
+
+### Netty의 단점
+
+- **복잡성** 높음
+- **디버깅 어려움** (멀티스레드 환경)
+- **메모리 공유로 인한 동시성 문제** 가능성
+- **개발 생산성** 상대적으로 낮음
+
+### Node.js의 장점
+
+- **단순성** (개발자가 동시성 걱정 안해도 됨)
+- **빠른 개발 속도**
+- **디버깅 쉬움** (단일 스레드)
+- **생태계 풍부함** (npm)
+
+### Node.js의 단점
+
+- **CPU 집약적 작업 부적합**
+- **하나의 코어만 기본 활용**
+- **블로킹 작업시 전체 지연**
+
+</aside>
+
+<aside>
+🧐
+
+이거 스프링에서 컨트롤러 매핑해주는 핸들러랑 비슷하잖아..?
+
+Spring MVC의 DispatcherServlet도 리액터 패턴이냐..?
+
+맞다!
+
+동기 리액터
+
+다른건 비동기 리액터
+
+### 3가지 핵심 구성요소
+
+**이벤트 감지기 (Event Demultiplexer)**
+
+- 여러 소스에서 오는 이벤트들을 동시에 모니터링
+- Linux의 `epoll`, Windows의 `IOCP` 같은 시스템 콜 활용
+- "어떤 소켓에 데이터가 왔는지" 효율적으로 감지
+
+**디스패처 (Dispatcher)**
+
+- 감지된 이벤트를 적절한 핸들러로 라우팅
+- 이벤트 타입과 핸들러 매핑 관리
+- 단일 스레드에서 순차적으로 처리
+
+**핸들러 (Event Handler)**
+
+- 실제 비즈니스 로직 수행
+- 빠르게 처리하고 제어권 반환
+- 절대 블로킹 연산 금지!
+
+### MVC에서는
+
+- `DispatcherServlet`이 요청을 받아
+- `HandlerMapping`으로 컨트롤러를 찾고
+- `HandlerAdapter`로 호출
+
+### WebFlux에서는
+
+- Netty나 비동기 서블릿이 이벤트 루프 감지
+- `DispatcherHandler`가 핸들러 체인을 호출 (`HandlerFunction`, `HandlerAdapter`)
+- `Mono`, `Flux` 형태로 논블로킹 스트림 처리
+</aside>
+
+<aside>
+🧐
+
+### Jetty ⇒ Netty는 그럼 혁신인가?!
+
+약간.. Node.js 스러워졌네?!
+
+서블릿 기반 → 이벤트 루프 기반 으로 패러다임의 전환
+
+ Netty: 이벤트 기반 스택 (동작은 깊이 X, 넓게 흐름 전파)
+Jetty: 요청당 스레드로 Call Stack이 하나 완성됨 (Servlet 구조)
+
+→ Netty는 '흐름을 던지고', Jetty는 '흐름을 쌓는다'
+
+- **Jetty**: 흐름을 **쌓는다** (Call Stack 구조)
+- **Netty**: 흐름을 **던진다** (Event Propagation)
+
+| 구분 | Jetty | Netty |
+| --- | --- | --- |
+| **정체성** | 서블릿 컨테이너 | 저수준 네트워크 프레임워크 |
+| **I/O 모델** | 블로킹 (NIO 지원하지만 서블릿 제약) | 완전한 논블로킹 + 이벤트 루프 |
+| **API 기준** | `javax.servlet` 표준 | 직접 TCP 처리 (커스텀 파이프라인) |
+| **적용 사례** | Spring MVC, JSP, 일반 웹앱 | Spring WebFlux, gRPC, 고성능 서버 |
+| **스레드 모델** | Thread-per-request | 소수 이벤트 루프로 수만 연결 처리 |
+
+## 아키텍처 구조 비교
+
+### Jetty: Thread + Filter Chain + Servlet
+
+```
+
+클라이언트 요청
+    ↓
+[서블릿 스레드 풀] ← 요청당 스레드 할당
+    ↓
+[Filter Chain] ← 서블릿 필터 (Security, Logging 등)
+    ↓
+[DispatcherServlet] ← Spring MVC 중심 컨트롤러
+    ↓
+[Controller] ← @GetMapping 실행
+    ↓
+응답 전송
+
+```
+
+### Netty: Channel + Pipeline + Handler
+
+```
+
+클라이언트 요청
+    ↓
+[Channel] ← 소켓 연결 (통신 통로)
+    ↓
+[Pipeline] ← 조립식 처리 라인
+    ├─ HttpRequestDecoder ← 문자열 → 객체 파싱
+    ├─ HttpObjectAggregator ← 조각난 요청 합치기
+    ├─ BusinessHandler ← 사용자 비즈니스 로직
+    └─ HttpResponseEncoder ← 객체 → 문자열 변환
+    ↓
+응답 전송
+
+```
+
+## 실행 흐름 비교
+
+### Jetty 실행 스택 (깊이 우선)
+
+```java
+
+// 한 스레드에서 모든 것이 스택으로 쌓임
+QueuedThreadPool.runJob()
+    ↓
+HttpChannel.handle()
+    ↓
+ServletHandler.doHandle()
+    ↓
+FilterChain.doFilter()
+    ↓
+DispatcherServlet.service()
+    ↓
+doDispatch()
+    ↓
+HandlerAdapter.handle()
+    ↓
+@Controller 메서드 실행
+    ↓
+response.flushBuffer()
+
+```
+
+전통적인 **동기 호출 체인**, 깊고 복잡한 스택
+
+### Netty 실행 흐름 (이벤트 전파)
+
+```java
+
+// 이벤트 루프에서 이벤트 전파
+EpollEventLoop.run()
+    ↓
+NioEventLoop.processSelectedKeys()
+    ↓
+Pipeline.fireChannelRead(msg)// 이벤트 전파 시작
+    ↓
+HttpRequestDecoder.channelRead()
+    ↓
+HttpObjectAggregator.channelRead()
+    ↓
+CustomHandler.channelRead()// 비즈니스 로직
+    ↓
+ctx.writeAndFlush(response)
+    ↓
+HttpResponseEncoder.channelWrite()
+
+```
+
+**이벤트 기반 전파**, 얕고 단순한 핸들러 체인
+
+</aside>
+
+### 프레임워크 사용하기
+
+if) 줄 단위로 데이터를 수신하는 서버 구현
+
+case 1: 블로킹 IO
+
+BufferedReader를 사용해서 쉽게 줄단위로 데이터를 읽을 수 있음
+
+```java
+BufferedReader br = new BufferedReader(
+	new InputStreamReader(socket.getInputStream(), "UTF-8")
+);
+...
+while((line = br.readLine()) != null ) {//줄 단위로 쉽게 읽을 수 있다~
+		//그 line을 처리하면됨
+		
+}
+```
+
+case 2: 논블로킹 IO
+
+처리가 복잡해진다
+
+데이터를 읽은 후 \n 문자가 있는지 확인해야 함
+
+\n 문자가 여러개 있는 경우도 처리해야함
+
+채널마다 누적 처리를 위한 버퍼도 관리해야 함
+
+주고받는 데이터 형식이 조금만 바뀌어도 매번 저수준의 IO 처리 로직을 재구현해야함
+
+⇒ 이걸 해주는 프레임워크 사용이 권장됨
+
+### Reactor Netty!
+
+데이터 주고받는 에코서버 구현가능~
+
+```java
+DisposableServer server = TcpServer.create()
+    .port(7031)
+    .doOnConnection(conn -> 
+        conn.addHandlerFirst(new LineBasedFrameDecoder(1024)) // 줄 단위 읽기 처리
+    )
+    .handle((in, out) -> {
+        return in.receive()
+            .asString() // byte를 문자열로 변환
+            .doOnNext(line -> {
+                log.info("received: {}", line);
+            })
+            .flatMap(line -> 
+                out.sendString(Mono.just(line + "\n")) // 문자열 쓰기
+            );
+    });
+
+```
+
+리액터 네티가 줄 단위 읽기와 문자열 변환 처리 기능을 제공해서 직접 구현 안해도 된다~
+
+리액터 네티의 기반인 리액티브 API를 익히는 러닝커브 <<<< 논블로킹 IO 직접 구현하는 유지보수
+
+### 논블로킹/비동기 IO와 성능
+
+자바 push 서버를 블로킹 ⇒ 논블로킹으로 전환
+
+최대 동접수 6000 ⇒ 120000
+
+힙메모리 1.5G 할당시 저렇다고 함
