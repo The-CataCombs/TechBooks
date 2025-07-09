@@ -1,0 +1,705 @@
+**📚 개발 도서 스터디 템플릿**
+
+# **🧠 1. 책을 읽기 전에**
+
+보안 ⇒ 솔직히 재미없을거라 생각했는데 읽다보니 떠오르는 것들도 있고 왜인지 흥미로워서 생각보다 재미있게 읽었다!
+
+---
+
+# **📂 2. 내용 정리**
+
+8장 공부내용
+
+# **💬 3. 이야기하고 싶은 질문 / 포인트**
+
+> 읽으며 생긴 의문, 확인하고 싶은 개념, 비판하고 싶은 주장 등을 적습니다.
+> 
+
+## 인증과 토큰
+
+서버는 토큰을 통해 사용자를 식별
+
+## 토큰과 사용자간의 매핑 정보를 저장하는 두가지 방법
+
+### 1. 별도 저장소에 토큰(고유해야 함)과 사용자 식별 정보 저장
+
+### 2. 토큰 자체에 사용자 식별 정보 저장
+
+이걸 하다가 생각난 웹소켓 인증인가 개발기
+
+<aside>
+🤔
+
+### 웹소켓 연결할때 인증인가 및 보안 고려하는게 어려웠던 경험이 있어요…
+
+브라우저는 `Authorization` 헤더를 WebSocket 핸드쉐이크시에 직접 추가할 수 없다는 제약이 있음!
+
+ [community.fly.io+4ably.com+4systemdesign.one+4](https://ably.com/blog/websocket-authentication?utm_source=chatgpt.com).
+
+대신 웹소켓 서버가 HTTP 업그레이드 요청을 확인해서 허가된 출처인지 검사후 연결해줘야 함
+
+## **웹소켓 인증 구현 방법들**
+
+### **1. Query Parameter 방식 (가장 흔함)**
+
+```jsx
+
+// 클라이언트
+const token = await getAccessToken();
+const ws = new WebSocket(`wss://api.example.com/ws?token=${token}`);
+
+// 서버 (Node.js + Socket.io 예시)
+io.use((socket, next) => {
+  const token = socket.handshake.query.token;
+  jwt.verify(token, secretKey, (err, decoded) => {
+    if (err) return next(new Error('Authentication error'));
+    socket.userId = decoded.userId;
+    next();
+  });
+});
+
+```
+
+- **장점**: 구현이 간단, 기존 REST 토큰 방식 연장선
+- **단점**: URL에 토큰 노출 → 서버 로그, 프록시, 브라우저 캐시 등에 기록 위험
+
+### **2. 첫 메시지로 인증**
+
+```jsx
+// 클라이언트
+const ws = new WebSocket('wss://api.example.com/ws');
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: 'auth',
+    token: accessToken
+  }));
+};
+
+// 서버
+ws.on('message', (data) => {
+  const message = JSON.parse(data);
+  if (message.type === 'auth' && !ws.authenticated) {
+// 토큰 검증 후 연결 인증 상태 설정
+    ws.authenticated = true;
+    ws.userId = decoded.userId;
+  }
+});
+
+```
+
+- **장점**: URL에 토큰 노출되지 않고, 인증 토큰만 최초 메시지에서 교환
+- **단점**: 인증이 지연되어, 인증 전 메시지 수신 차단 로직 필요
+
+### **3. Cookie 방식 (세션)**
+
+```jsx
+
+// 클라이언트 (쿠키 자동 전송)
+const ws = new WebSocket('wss://api.example.com/ws');
+
+// 서버 (Express + ws 예시)
+wss.on('connection', (ws, req) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionId = cookies.sessionId;
+
+// 세션 검증
+  if (isValidSession(sessionId)) {
+    ws.userId = getUserIdFromSession(sessionId);
+  } else {
+    ws.close();
+  }
+});
+
+```
+
+- **장점**: HTTP 세션 재사용 → 인증 로직 단순화
+- **단점**: 세션 스토리지 필요, 수평 확장시 Redis/Memcached 등 외부 스토어 필요
+
+### 내가 했던 방식은?!
+
+정말 고민하면서 만들었었음…
+
+1. 토큰 기반 웹소켓 인증을 함
+    
+     왜냐하면 서버에 세션 저장소를 정말정말 두고싶지 않았음
+    
+    서버 수평확장시에도 사용할 수 있도록 하고싶었음
+    
+2. 처음에는 매 요청마다 권한별 필터링을 빡세게 토큰으로 돌림
+    
+    ⇒ 나중에는 api 내부호출 줄이려고 세션 도입하긴 함(나름 성능을 생각하려는 시도가 있었다)
+    
+3. 그리고 매 인증마다 권한이 아직도 살아있는게 맞는지 체크를 함 
+    
+    ⇒ 나중에 다시 말하지만 이거 판단 잘못함… 우리 서비스 그렇게까진 보안이 중요한 서비스 아니세요
+    
+
+```java
+@Configuration
+@EnableWebSocketMessageBroker
+class WebSocketConfig(
+  private val authClient: AuthClient,
+  private val serverClient: ServerClient,
+  private val accessVerifier: AccessVerifier,
+) : WebSocketMessageBrokerConfigurer {
+  @Value("\${url.front}")
+  val frontUrl: String = ":63343"
+
+  override fun registerStompEndpoints(registry: StompEndpointRegistry) {
+    registry.addEndpoint("/ws").setAllowedOrigins(frontUrl).withSockJS()
+  }
+
+  override fun configureMessageBroker(config: MessageBrokerRegistry) {
+    config.setApplicationDestinationPrefixes("/app")
+    config.enableSimpleBroker("/topic", "/queue")
+  }
+
+  override fun configureWebSocketTransport(registry: WebSocketTransportRegistration) {
+    registry.setMessageSizeLimit(4 * 8192)
+    registry.setTimeToFirstMessage(30000)
+  }
+
+  @Bean
+  fun webSocketInterceptor(): ChannelInterceptor {
+    return object : ChannelInterceptor {
+      override fun preSend(
+        message: Message<*>,
+        channel: MessageChannel,
+      ): Message<*> {
+        val simpMessageType = SimpMessageHeaderAccessor.getMessageType(message.headers)
+        return when (simpMessageType) {
+          SimpMessageType.CONNECT -> authenticateAndSetPrincipal(message)
+          SimpMessageType.SUBSCRIBE -> filterSubscriptionDestination(message)
+          SimpMessageType.MESSAGE -> verifyAccess(message)
+          else -> message
+        }
+      }
+    }
+  }
+
+  private fun filterSubscriptionDestination(message: Message<*>): Message<*> {
+    val destination = SimpMessageHeaderAccessor.wrap(message).destination
+    if (destination != null && !destination.startsWith("/user/queue/disconnect")) {
+      return verifyAccess(message)
+    }
+    return message
+  }
+
+  private fun authenticateAndSetPrincipal(message: Message<*>): Message<*> {
+    val headerAccessor = SimpMessageHeaderAccessor.wrap(message)
+    val token =
+      headerAccessor.getFirstNativeHeader("Authorization")
+        ?.removePrefix("Bearer ")
+        ?: throw GlobalException(ErrorCode.MISSING_TOKEN)
+
+    val userId =
+      authClient.getTokenInfo(token).data?.userId
+        ?: throw GlobalException(ErrorCode.INVALID_TOKEN)
+
+    val principal = UsernamePasswordAuthenticationToken(userId, null, emptyList())
+    SimpMessageHeaderAccessor.getAccessor(message, SimpMessageHeaderAccessor::class.java)?.user = principal
+
+    return message
+  }
+
+  private fun verifyAccess(message: Message<*>): Message<*> {
+    val headerAccessor = SimpMessageHeaderAccessor.wrap(message)
+    val token = getTokenFromHeader(headerAccessor)
+    val contextId = getContextIdFromHeader(headerAccessor)
+    val type = ChatType.valueOf(getContext(headerAccessor))
+    verifyAccessByType(type, token, contextId)
+    return message
+  }
+
+  private fun verifyAccessByType(
+    type: ChatType,
+    token: String,
+    contextId: String,
+  ) {
+    when (type) {
+      ChatType.ROOM -> {
+        val userId =
+          authClient.getTokenInfo(token).data?.userId
+            ?: throw GlobalException(ErrorCode.INVALID_TOKEN)
+        accessVerifier.verifyChatRoomAccess(contextId, userId)
+      }
+      ChatType.SERVER -> {
+        val serverList =
+          serverClient.getServerList(token, GetServerCondition())
+            .body?.data ?: throw GlobalException(ErrorCode.SERVER_ERROR)
+        accessVerifier.verifyServerAccess(serverList, contextId)
+      }
+      else -> throw GlobalException(ErrorCode.INVALID_CONTEXT)
+    }
+  }
+
+  private fun getTokenFromHeader(headerAccessor: SimpMessageHeaderAccessor): String {
+    return headerAccessor.getFirstNativeHeader("Authorization")
+      ?.removePrefix("Bearer ")
+      ?: throw GlobalException(ErrorCode.MISSING_HEADER_INFO)
+  }
+
+  private fun getContextIdFromHeader(headerAccessor: SimpMessageHeaderAccessor): String {
+    return headerAccessor.getFirstNativeHeader("ContextId")
+      ?: throw GlobalException(ErrorCode.MISSING_HEADER_INFO)
+  }
+
+  private fun getContext(headerAccessor: SimpMessageHeaderAccessor): String {
+    return headerAccessor.getFirstNativeHeader("Context")
+      ?: throw GlobalException(ErrorCode.MISSING_HEADER_INFO)
+  }
+
+  override fun configureClientInboundChannel(registration: ChannelRegistration) {
+    registration.interceptors(webSocketInterceptor())
+  }
+
+  @Bean
+  fun corsFilter(): CorsFilter {
+    val config = CorsConfiguration()
+    config.allowCredentials = true
+    config.addAllowedOrigin(frontUrl)
+    config.addAllowedHeader("*")
+    config.addAllowedMethod("*")
+
+    val source: UrlBasedCorsConfigurationSource = UrlBasedCorsConfigurationSource()
+    source.registerCorsConfiguration("/**", config)
+    return CorsFilter(source)
+  }
+}
+```
+
+### 설명: 헤더 기반 토큰 전송
+
+```kotlin
+private fun authenticateAndSetPrincipal(message: Message<*>): Message<*> {
+  val token = headerAccessor.getFirstNativeHeader("Authorization")
+    ?.removePrefix("Bearer ")
+    ?: throw GlobalException(ErrorCode.MISSING_TOKEN)
+}
+```
+
+- Query parameter보다 안전 (로그 노출 위험 없음)
+- 표준적인 Authorization 헤더 사용
+- Bearer 토큰 형식 준수
+
+```kotlin
+return when (simpMessageType) {
+  SimpMessageType.CONNECT -> authenticateAndSetPrincipal(message)     // 연결 시 인증
+  SimpMessageType.SUBSCRIBE -> filterSubscriptionDestination(message) // 구독 시 권한 확인
+  SimpMessageType.MESSAGE -> verifyAccess(message)                    // 메시지 전송 시 권한 확인
+  else -> message
+}
+```
+
+당시의 저는 권한 제어에 미쳐있었죠 
+
+- 연결/구독/메시지 각 단계별 세밀한 권한 제어
+- 실시간으로 권한 변경 반영 가능
+
+왜냐하면 채팅방에서 추방된 사람이 계속 웹소켓 연결만으로 그 방을 구독할 수 있거나
+
+주소만 있는 사람이 도청(?)을 할 수 있는 상황을 막고싶었거든요
+
+### 컨텍스트별 접근 제어
+
+```kotlin
+private fun verifyAccessByType(type: ChatType, token: String, contextId: String) {
+  when (type) {
+    ChatType.ROOM -> accessVerifier.verifyChatRoomAccess(contextId, userId)
+    ChatType.SERVER -> accessVerifier.verifyServerAccess(serverList, contextId)
+  }
+}
+```
+
+- 채팅방별/서버별 세밀한 권한 관리
+- 다양한 컨텍스트 지원
+
+그러고 나서 실제 동작할때도 토큰에서 뽑아와서 매번 권한을 인증시켜주고 있었는데
+
+뭔가 auth 모듈에 대한 api 요청이 너무너무 많아져서 웹소켓으로 연결하는건 애초에 트래픽 줄이려고 하는건데 내부 트래픽이 늘어나는것도 뭔가 좀 애초의 목적에 어긋나는 것 같아서 세션을 다소 도입함 
+
+위처럼 권한 필터링하는건 계속하긴 했는데
+
+Spring Security FilterChain에서 채팅방 연결시마다 인증해가지고 
+
+crud에서는 이렇게 활용했음 거기서 뽑은 Principal을 가져와서 사용
+
+```java
+@MessageMapping("/chat/update")
+  fun updateChat(
+    @Payload @Validated request: UpdateChatRequest,
+    principal: Principal,
+  ) {
+    val userId = principal.name
+    val contextId = request.contextId
+
+    val result = chatService.updateChat(request, userId)
+    simpMessagingTemplate.convertAndSend("/topic/chatroom/$contextId", result)
+  }
+
+```
+
+근데 저 Principal에 담는 부분이 스프링 세션에 담는거라 어차피 하나의 스프링 서버의 세션을 써서… 
+
+세션 저장소를 분리시키려고 하고 있다가 프로젝트가 엎어졌습니다~
+
+저때는 혼자 머리싸매고 저러고 있었음
+
+### 이번에 궁금해진 다른 회사들의 연결방식
+
+난 잘 한게 맞았을까?
+
+일단 Slack이랑 Discord만 살펴봄
+
+`캐시`랑 `배치` 만 기억하면 됨
+
+### Slack 방식 (Socket Mode 기준) [api.slack.com+1github.com+1](https://api.slack.com/apis/socket-mode?utm_source=chatgpt.com).
+
+- 앱은 먼저 REST API `apps.connections.open` 호출로 WSS URL (ticket)을 발급받음
+- 연결 시 티켓 기반 인증 완료
+- 연결 중간에는 15분마다 토큰 재검증을 수행함
+- 인증 주체(Principal)는 계속 재사용됨
+
+### Discord 방식 (캐시 + 배치)
+
+- 연결 시 토큰 포함해 인증
+- 이후 토큰은 **5분 TTL 캐시**로 저장
+- 주기 백그라운드 배치 작업으로 검증하며, 실시간 처리에는 캐시 사용
+- 장점: 인증 API 호출 횟수 줄임 → 네트워크 부담 감소
+
+결론적으로 이상하게 짠게 맞았다~
+
+나는 캐시와 배치 중 캐시밖에 접근을 못함
+
+이 책을 공부하고 난 이후에 짰다면 아마 배치도 넣었을 것 같긴 하다
+
+| 항목 | Slack | Discord | 내 구조 |
+| --- | --- | --- | --- |
+| 연결 시 인증 | ✅ `apps.connections.open` (티켓 발급) | ✅ IDENTIFY 메시지로 토큰 인증 | ✅ `CONNECT` 시 토큰 인증 |
+| 연결 중간 검증
+(배치냐고!!!) | ✅ BATCH
+15분마다 토큰 재검증 | ✅ BATCH
+5분 TTL 캐시 + 배치 재검증 | ❌ NO BATCH
+항상 요청마다 실시간 인증 |
+| Principal 사용
+(나름의 캐싱) | ✅ CACHE
+인증 시 세션에 주입, 이후 재사용 | ✅ CACHE
+IDENTIFY → 세션 메모리에 보관 | ✅ CACHE
+한 번 주입 후 계속 사용 |
+| API 호출 최적화 | ✅ 주기적 재검증으로 줄임 | ✅ 캐시로 최대한 피함 | ❌ 메시지마다 호출 발생 |
+
+⇒ 나도 매 요청마다 인가 빡세게 잡지 말고 걍 15분은 텀 두는게 나았을지도…
+
+⇒ 디스코드 방식이면 서버에서 배치를 돌릴 필요도 없이 TTL 만료되면 클라에서 다시 요청보내면 되어서 더 좋은거같다… 
+
+### 슬랙은 왜 디스코드처럼 TTL로 안 하고 서버 배치를 돌렸을까?
+
+- Slack SDK (Bolt) 내부에서 백그라운드 배치 처리로 구현됨
+
+### 슬랙은 회사용(보안이 중요), 디스코드는 게임용(성능이 중요)
+
+디스코드는 최대한 경량으로 줄여서 트래픽을 줄이고 서버 부하도 줄이는 것이 주 목적
+
+어쩐지 how discord 쳤을때 가장 먼저 나오는 글이 웹소켓 트래픽을 압축을 어떻게 해서 줄였는지임
+
+https://discord.com/blog/how-discord-reduced-websocket-traffic-by-40-percent 
+
+슬랙은 기업용이라 보안이 더 중요해서 서버에서 재검증한다고 함
+
+서버에서 재검증하면 좋은것
+
+- **토큰 탈취 대응 가능**
+    - 클라이언트가 탈취된 토큰으로 계속 연결을 유지하고 있어도,
+    - 서버가 15분마다 재검증하면 **탈취된 토큰을 주기적으로 잡아낼 수 있음**
+- **권한 변경 실시간 반영**
+    - 사용자가 조직에서 탈퇴하거나 권한이 바뀌어도,
+    - **서버 배치가 재검증하면서 최신 상태로 자동 반영 가능**
+- **클라이언트 신뢰도 낮을 경우 강제 무효화 가능**
+    - 서버는 언제든 토큰을 revoke 하고,
+    - 다음 배치 때 해당 세션을 끊음 → **중앙 통제 가능**
+
+결론: 나는 기업용인 슬랙보다도 권한 검증을 더 빡세게 함…
+
+열심히 생각해서 짰지만 성능을 위해 어느정도의 보안 타협점을 두지 못했다
+완전무결하게 짜고싶었는데 엔지니어의 자세는 아니었던 것 같음
+
+무엇이 얼마나 중요한지 앞으로는 더 생각해보고 가치판단을 해서 설계할 것 같다!
+
+프로젝트가 엎어지지 않았으면 혼자 더 생각해보면서 결국 배치를 돌리든 했을것 같긴 함!(행복회로)
+
+</aside>
+
+# 시큐어 코딩
+
+단어가 참..익숙..하네요..
+
+```sql
+String id = request.getParameter("id");
+String query = "select id, name from member where id = '" + id + "'";
+ResultSet rs = stmt.executeQuery(query);
+```
+
+### SQL 인젝션 공격!!
+
+```sql
+' or 1=1 or id = '
+```
+
+⇒ member 테이블의 모든 조건 다 조회함
+
+### SQL 인젝션 방어!!
+
+Prepared Statement를 사용 ⇒ 값을 알맞게 변환해서 SQL을 만들어준다
+
+<aside>
+🤔
+
+### 의문점: JPA나 QueryDsl을 쓰면 저럴 일이 없지 않나?
+
+보안적인 면에서도 강점이 있었을 것 같다~
+
+둘 다 내부적으로 파라미터 바인딩을 해줘서 SQL 인젝션 공격을 할 수가 없을 것 같음
+
+### JPA Repository
+
+```java
+
+// 이렇게 넣어도
+memberRepository.findById("1' OR 1=1 OR id='");
+// → WHERE id = '1' OR 1=1 OR id=''  // 이렇게 안 됨!!!
+
+// 실제 동작
+memberRepository.findById("1' OR 1=1 OR id='");
+// → WHERE id = ?  (파라미터: "1' OR 1=1 OR id='")// → 결과: id가 정확히 "1' OR 1=1 OR id='" 인 레코드 찾기
+
+```
+
+### QueryDsl의 경우
+
+```sql
+// 이렇게 작성하면
+String userInput = "1' OR 1=1 OR id='";
+queryFactory
+    .selectFrom(member)
+    .where(member.id.eq(userInput))  // 악의적 입력
+    .fetch();
+
+// 내부적으로 이렇게 변환됨
+// SELECT * FROM member WHERE id = ?
+// 파라미터: "1' OR 1=1 OR id='"
+```
+
+- 내부적으로 파라미터 바인딩 : 파라미터: "1' OR 1=1 OR id='" 이렇게 들어가서 인젝션이 안 먹힘
+- 쿼리 구조 변경 불가능
+- 내부적으로 PreparedStatement를 사용 = 안전
+
+### However 조심해야 할 것들
+
+### **1. 동적 정렬/필드명**
+
+```java
+
+// 위험할 수 있음
+public Page<Member> getMembers(String sortBy) {
+    Sort sort = Sort.by(sortBy);// sortBy = "id); DROP TABLE member;--"
+    return memberRepository.findAll(PageRequest.of(0, 10, sort));
+}
+
+// 안전한 방법
+public Page<Member> getMembers(String sortBy) {
+    Set<String> allowedFields = Set.of("id", "name", "email");
+    if (!allowedFields.contains(sortBy)) {
+        sortBy = "id";// 기본값
+    }
+    Sort sort = Sort.by(sortBy);
+    return memberRepository.findAll(PageRequest.of(0, 10, sort));
+}
+
+```
+
+위는 왜 위험하냐면… 내부적으로 Sort는 PreparedStatement를 사용하지 않는다고 함
+
+생각해보면 당연하다… 값이 아니고 칼럼명이라 파라미터 바인딩을 사용할수가 없다~
+
+자유도가 생기니까 위험해지는것!
+
+정상적인 경우는 아래처럼 돌아가지만?
+
+```java
+
+Sort.by("name")
+// 생성되는 SQL// SELECT * FROM member ORDER BY name
+
+```
+
+악의적으로 쓰고자 하면 이렇게 된다…!
+
+```java
+
+Sort.by("name; DELETE FROM member WHERE 1=1")
+// 생성되는 SQL// SELECT * FROM member ORDER BY name; DELETE FROM member WHERE 1=1//
+
+```
+
+### **2. JPQL/HQL에서 문자열 조합**
+
+```java
+
+// 위험!
+String jpql = "SELECT m FROM Member m WHERE m." + fieldName + " = :value";
+Query query = entityManager.createQuery(jpql);
+
+// 안전!
+@Query("SELECT m FROM Member m WHERE m.name = :value")
+
+```
+
+### **3. Criteria API 잘못 사용**
+
+```java
+
+// 위험할 수 있음 (거의 안 일어나지만)
+CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+// 동적으로 필드명을 문자열로 조합하면 위험
+
+```
+
+### **4. SpEL(Spring Expression Language) 사용**
+
+```java
+
+// 위험!
+@Query("SELECT m FROM Member m WHERE m.id = #{#userInput}")
+// SpEL은 임의 코드 실행 가능// 안전!
+@Query("SELECT m FROM Member m WHERE m.id = :userInput")
+
+```
+
+## 경각심
+
+JPQL을 쓰면서 
+
+⇒ 공간인덱스(MySQL Spatial Index)가 그것밖에 지원하지 않았음…
+
+가독성이 너무너무 떨어지길래 빌더패턴으로 쿼리를 합성하는 메서드를 짰던 과거의 나…
+
+과거의 저는 쿼리빌더를 만들어 JPQL의 집나간 코드 가독성 및 재사용성을 극도로 올리고 행복했었다고 합니다 ㅎㅎ…
+
+그러나 갑자기 내가 sql 인젝션에 취약한 코드를 짰던게 아닐까?
+
+아무런 고려도 하지 않았는데?
+
+하고 식겁하여 다시 들여다보았습니다
+
+```java
+public class PostQueryBuilder {
+
+    private final StringBuilder jpql;
+    @PersistenceContext
+    private final EntityManager entityManager;
+    private final Map<String, Object> parameters = new HashMap<>();
+
+    public PostQueryBuilder(EntityManager entityManager) {
+        this.entityManager = entityManager;
+        this.jpql = new StringBuilder("SELECT p FROM Post p WHERE 1=1");
+    }
+
+    public PostQueryBuilder withStatus(PostStatusEnum status) {
+        if (status != null) {
+            jpql.append(" AND p.postStatus = :status");
+            parameters.put("status", status);
+        }
+        return this;
+    }
+
+    public PostQueryBuilder withKeyword(String keyword) {
+        if (keyword != null && !keyword.trim().isEmpty()) {
+            jpql.append(" AND p.store LIKE :keyword");
+            parameters.put("keyword", "%" + keyword + "%");
+        }
+        return this;
+    }
+
+    public PostQueryBuilder withCuisine(String cuisine) {
+        if (cuisine != null && !cuisine.trim().isEmpty()) {
+            jpql.append(" AND p.cuisine = :cuisine");
+            parameters.put("cuisine", cuisine);
+        }
+        return this;
+    }
+
+    public PostQueryBuilder orderByDistance(User user) {
+        Point userLocation = user.getLocation();
+        if (userLocation != null) {
+            jpql.append(" AND p.location IS NOT NULL ORDER BY distance(p.location, :userLocation) ASC");
+            parameters.put("userLocation", userLocation);
+            return andOrderByDeadline();
+        }
+        return orderByDeadline();
+    }
+
+    public PostQueryBuilder andOrderByDeadline() {
+        jpql.append(", p.deadline DESC");
+        return this;
+    }
+
+    public PostQueryBuilder orderByDeadline() {
+        jpql.append(" ORDER BY p.deadline DESC");
+        return this;
+    }
+
+    public TypedQuery<Post> build() {
+        TypedQuery<Post> query = entityManager.createQuery(jpql.toString(), Post.class);
+        parameters.forEach(query::setParameter);
+        return query;
+    }
+}
+```
+
+```java
+@RequiredArgsConstructor
+@Repository
+public class PostCustomRepositoryImpl implements PostCustomRepository {
+
+    @PersistenceContext
+    private final EntityManager entityManager;
+    private final int PAGE_SIZE = 5;
+
+    @Override
+    public List<Post> getPosts(TypedQuery<Post> query, int page) {
+        int offset = page * PAGE_SIZE;
+
+        query.setFirstResult(offset);
+        query.setMaxResults(PAGE_SIZE);
+
+        return query.getResultList();
+    }
+}
+```
+
+다시 보니 고려했던것은 아니지만 파라미터 바인딩을 열심히 적용해놔서 살았다고 합니다 
+
+따봉콜론아 고마워~ :
+
+큰일날뻔~
+
+</aside>
+
+### **🎯 4. 정리 & 적용 아이디어**
+
+- **내가 배운 것 한 줄 요약**:→ `이 장을 통해 나는 보안을 어떻게 하면 신경쓸 수 있을지, 또 보안과 성능 사이의 타협점을 찾아야 한다는 것을 이해했다.`
+
+웹소켓 인증인가 생각하다가 서비스에서 보안이 70%로 중요한지 30%로 중요한지에 따라 성능을 개선할 수 있다는 좋은 깨달음을 얻음
+
+좋은 개발자는 저 가치판단을 잘 하고 최적의 설계를 해내는 사람이 아닐까?
+
+우리회사는 아마 100% 보안이 아닐까…
+
+---
+
+**🌟 5. 전체 리뷰**
+
+- **별점 평가** (⭐️ 5점 만점): `⭐️⭐️⭐️⭐️⭐️`
+- **이번 챕터에 대한 총평**
+    - 보안 문제랑 개념을 두루두루 익혀서 시야가 넓어진 것 같다!
+    - 생각보다 유익하고 매우 재미있었다
